@@ -15,10 +15,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 mod claude;
+mod codex;
 mod opencode;
 
 #[cfg(test)]
 pub use claude::ClaudeAgent;
+#[cfg(test)]
+pub use codex::CodexAgent;
 #[cfg(test)]
 pub use opencode::OpencodeAgent;
 
@@ -72,12 +75,14 @@ pub trait Agent {
 #[derive(Clone, ValueEnum)]
 pub enum AgentKind {
     Claude,
+    Codex,
     Opencode,
 }
 
 pub fn from_kind(kind: AgentKind) -> Box<dyn Agent> {
     match kind {
         AgentKind::Claude => Box::new(claude::ClaudeAgent),
+        AgentKind::Codex => Box::new(codex::CodexAgent),
         AgentKind::Opencode => Box::new(opencode::OpencodeAgent),
     }
 }
@@ -96,6 +101,16 @@ mod tests {
     fn from_kind_opencode_installs_opencode() {
         let agent = from_kind(AgentKind::Opencode);
         assert!(agent.install().contains("https://opencode.ai/install"));
+    }
+
+    #[test]
+    fn from_kind_codex_installs_codex() {
+        let agent = from_kind(AgentKind::Codex);
+        assert!(
+            agent
+                .install()
+                .contains("https://chatgpt.com/codex/install.sh")
+        );
     }
 
     #[test]
