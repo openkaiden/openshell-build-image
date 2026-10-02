@@ -112,6 +112,10 @@ static UBUNTU_OPENCODE_OPENAI_IMAGE: OnceLock<String> = OnceLock::new();
 static FEDORA_OPENCODE_OPENAI_IMAGE: OnceLock<String> = OnceLock::new();
 static UBI_OPENCODE_OPENAI_IMAGE: OnceLock<String> = OnceLock::new();
 static HUMMINGBIRD_OPENCODE_OPENAI_IMAGE: OnceLock<String> = OnceLock::new();
+static UBUNTU_CODEX_IMAGE: OnceLock<String> = OnceLock::new();
+static FEDORA_CODEX_IMAGE: OnceLock<String> = OnceLock::new();
+static UBI_CODEX_IMAGE: OnceLock<String> = OnceLock::new();
+static HUMMINGBIRD_CODEX_IMAGE: OnceLock<String> = OnceLock::new();
 static UBUNTU_OPENCODE_OPENAI_MODEL_IMAGE: OnceLock<String> = OnceLock::new();
 static UBUNTU_NO_POLICY_IMAGE: OnceLock<String> = OnceLock::new();
 static UBUNTU_CLAUDE_NO_AGENT_SETTINGS_IMAGE: OnceLock<String> = OnceLock::new();
@@ -625,6 +629,15 @@ fn check_opencode_in_path(image: &str, expected: bool) {
     }
 }
 
+fn check_codex_in_path(image: &str, expected: bool) {
+    let out = run_in_image(image, "which codex");
+    if expected {
+        assert!(out.status.success(), "codex not found in PATH");
+    } else {
+        assert!(!out.status.success(), "codex should not be in PATH");
+    }
+}
+
 fn check_claude_policy(image: &str, expected: bool) {
     let out = run_in_image(image, "cat /etc/openshell/policy.yaml");
     assert!(out.status.success(), "failed to read policy.yaml");
@@ -655,6 +668,23 @@ fn check_opencode_policy(image: &str, expected: bool) {
         assert!(
             !policy.contains("name: opencode"),
             "opencode policy rule should not be present in policy.yaml"
+        );
+    }
+}
+
+fn check_codex_policy(image: &str, expected: bool) {
+    let out = run_in_image(image, "cat /etc/openshell/policy.yaml");
+    assert!(out.status.success(), "failed to read policy.yaml");
+    let policy = String::from_utf8_lossy(&out.stdout);
+    if expected {
+        assert!(
+            policy.contains("name: codex"),
+            "codex policy rule not found in policy.yaml"
+        );
+    } else {
+        assert!(
+            !policy.contains("name: codex"),
+            "codex policy rule should not be present in policy.yaml"
         );
     }
 }
@@ -732,7 +762,7 @@ fn check_openai_policy(image: &str, expected: bool) {
 // ---------------------------------------------------------------------------
 
 macro_rules! image_tests {
-    ($mod_name:ident, $image_fn:ident, has_claude: $has_claude:literal, has_opencode: $has_opencode:literal, has_anthropic: $has_anthropic:literal, has_vertexai: $has_vertexai:literal, has_ollama: $has_ollama:literal, has_openai: $has_openai:literal) => {
+    ($mod_name:ident, $image_fn:ident, has_claude: $has_claude:literal, has_opencode: $has_opencode:literal, has_codex: $has_codex:literal, has_anthropic: $has_anthropic:literal, has_vertexai: $has_vertexai:literal, has_ollama: $has_ollama:literal, has_openai: $has_openai:literal) => {
         mod $mod_name {
             use super::*;
 
@@ -768,6 +798,12 @@ macro_rules! image_tests {
 
             #[test]
             #[ignore]
+            fn codex_in_path() {
+                check_codex_in_path($image_fn(), $has_codex);
+            }
+
+            #[test]
+            #[ignore]
             fn policy_yaml_present() {
                 check_policy_yaml($image_fn());
             }
@@ -782,6 +818,12 @@ macro_rules! image_tests {
             #[ignore]
             fn policy_has_opencode_rules() {
                 check_opencode_policy($image_fn(), $has_opencode);
+            }
+
+            #[test]
+            #[ignore]
+            fn policy_has_codex_rules() {
+                check_codex_policy($image_fn(), $has_codex);
             }
 
             #[test]
@@ -811,34 +853,38 @@ macro_rules! image_tests {
     };
 }
 
-image_tests!(ubuntu,                  ubuntu_image,                  has_claude: false, has_opencode: false, has_anthropic: false, has_vertexai: false, has_ollama: false, has_openai: false);
-image_tests!(ubuntu_claude,           ubuntu_claude_image,           has_claude: true,  has_opencode: false, has_anthropic: true,  has_vertexai: false, has_ollama: false, has_openai: false);
-image_tests!(ubuntu_opencode,         ubuntu_opencode_image,         has_claude: false, has_opencode: true,  has_anthropic: true,  has_vertexai: false, has_ollama: false, has_openai: false);
-image_tests!(ubuntu_claude_vertexai,  ubuntu_claude_vertexai_image,  has_claude: true,  has_opencode: false, has_anthropic: false, has_vertexai: true,  has_ollama: false, has_openai: false);
-image_tests!(ubuntu_opencode_vertexai,ubuntu_opencode_vertexai_image,has_claude: false, has_opencode: true,  has_anthropic: false, has_vertexai: true,  has_ollama: false, has_openai: false);
-image_tests!(fedora,                  fedora_image,                  has_claude: false, has_opencode: false, has_anthropic: false, has_vertexai: false, has_ollama: false, has_openai: false);
-image_tests!(fedora_claude,           fedora_claude_image,           has_claude: true,  has_opencode: false, has_anthropic: true,  has_vertexai: false, has_ollama: false, has_openai: false);
-image_tests!(fedora_opencode,         fedora_opencode_image,         has_claude: false, has_opencode: true,  has_anthropic: true,  has_vertexai: false, has_ollama: false, has_openai: false);
-image_tests!(fedora_claude_vertexai,  fedora_claude_vertexai_image,  has_claude: true,  has_opencode: false, has_anthropic: false, has_vertexai: true,  has_ollama: false, has_openai: false);
-image_tests!(fedora_opencode_vertexai,fedora_opencode_vertexai_image,has_claude: false, has_opencode: true,  has_anthropic: false, has_vertexai: true,  has_ollama: false, has_openai: false);
-image_tests!(ubi,                     ubi_image,                     has_claude: false, has_opencode: false, has_anthropic: false, has_vertexai: false, has_ollama: false, has_openai: false);
-image_tests!(ubi_claude,              ubi_claude_image,              has_claude: true,  has_opencode: false, has_anthropic: true,  has_vertexai: false, has_ollama: false, has_openai: false);
-image_tests!(ubi_opencode,            ubi_opencode_image,            has_claude: false, has_opencode: true,  has_anthropic: true,  has_vertexai: false, has_ollama: false, has_openai: false);
-image_tests!(ubi_claude_vertexai,     ubi_claude_vertexai_image,     has_claude: true,  has_opencode: false, has_anthropic: false, has_vertexai: true,  has_ollama: false, has_openai: false);
-image_tests!(ubi_opencode_vertexai,   ubi_opencode_vertexai_image,   has_claude: false, has_opencode: true,  has_anthropic: false, has_vertexai: true,  has_ollama: false, has_openai: false);
-image_tests!(hummingbird,                     hummingbird_image,                     has_claude: false, has_opencode: false, has_anthropic: false, has_vertexai: false, has_ollama: false, has_openai: false);
-image_tests!(hummingbird_claude,              hummingbird_claude_image,              has_claude: true,  has_opencode: false, has_anthropic: true,  has_vertexai: false, has_ollama: false, has_openai: false);
-image_tests!(hummingbird_opencode,            hummingbird_opencode_image,            has_claude: false, has_opencode: true,  has_anthropic: true,  has_vertexai: false, has_ollama: false, has_openai: false);
-image_tests!(hummingbird_claude_vertexai,     hummingbird_claude_vertexai_image,     has_claude: true,  has_opencode: false, has_anthropic: false, has_vertexai: true,  has_ollama: false, has_openai: false);
-image_tests!(hummingbird_opencode_vertexai,   hummingbird_opencode_vertexai_image,   has_claude: false, has_opencode: true,  has_anthropic: false, has_vertexai: true,  has_ollama: false, has_openai: false);
-image_tests!(ubuntu_opencode_ollama,          ubuntu_opencode_ollama_image,          has_claude: false, has_opencode: true,  has_anthropic: false, has_vertexai: false, has_ollama: true,  has_openai: false);
-image_tests!(fedora_opencode_ollama,          fedora_opencode_ollama_image,          has_claude: false, has_opencode: true,  has_anthropic: false, has_vertexai: false, has_ollama: true,  has_openai: false);
-image_tests!(ubi_opencode_ollama,             ubi_opencode_ollama_image,             has_claude: false, has_opencode: true,  has_anthropic: false, has_vertexai: false, has_ollama: true,  has_openai: false);
-image_tests!(hummingbird_opencode_ollama,     hummingbird_opencode_ollama_image,     has_claude: false, has_opencode: true,  has_anthropic: false, has_vertexai: false, has_ollama: true,  has_openai: false);
-image_tests!(ubuntu_opencode_openai,          ubuntu_opencode_openai_image,          has_claude: false, has_opencode: true,  has_anthropic: false, has_vertexai: false, has_ollama: false, has_openai: true);
-image_tests!(fedora_opencode_openai,          fedora_opencode_openai_image,          has_claude: false, has_opencode: true,  has_anthropic: false, has_vertexai: false, has_ollama: false, has_openai: true);
-image_tests!(ubi_opencode_openai,             ubi_opencode_openai_image,             has_claude: false, has_opencode: true,  has_anthropic: false, has_vertexai: false, has_ollama: false, has_openai: true);
-image_tests!(hummingbird_opencode_openai,     hummingbird_opencode_openai_image,     has_claude: false, has_opencode: true,  has_anthropic: false, has_vertexai: false, has_ollama: false, has_openai: true);
+image_tests!(ubuntu,                  ubuntu_image,                  has_claude: false, has_opencode: false, has_codex: false, has_anthropic: false, has_vertexai: false, has_ollama: false, has_openai: false);
+image_tests!(ubuntu_claude,           ubuntu_claude_image,           has_claude: true,  has_opencode: false, has_codex: false, has_anthropic: true,  has_vertexai: false, has_ollama: false, has_openai: false);
+image_tests!(ubuntu_opencode,         ubuntu_opencode_image,         has_claude: false, has_opencode: true,  has_codex: false, has_anthropic: true,  has_vertexai: false, has_ollama: false, has_openai: false);
+image_tests!(ubuntu_claude_vertexai,  ubuntu_claude_vertexai_image,  has_claude: true,  has_opencode: false, has_codex: false, has_anthropic: false, has_vertexai: true,  has_ollama: false, has_openai: false);
+image_tests!(ubuntu_opencode_vertexai,ubuntu_opencode_vertexai_image,has_claude: false, has_opencode: true,  has_codex: false, has_anthropic: false, has_vertexai: true,  has_ollama: false, has_openai: false);
+image_tests!(fedora,                  fedora_image,                  has_claude: false, has_opencode: false, has_codex: false, has_anthropic: false, has_vertexai: false, has_ollama: false, has_openai: false);
+image_tests!(fedora_claude,           fedora_claude_image,           has_claude: true,  has_opencode: false, has_codex: false, has_anthropic: true,  has_vertexai: false, has_ollama: false, has_openai: false);
+image_tests!(fedora_opencode,         fedora_opencode_image,         has_claude: false, has_opencode: true,  has_codex: false, has_anthropic: true,  has_vertexai: false, has_ollama: false, has_openai: false);
+image_tests!(fedora_claude_vertexai,  fedora_claude_vertexai_image,  has_claude: true,  has_opencode: false, has_codex: false, has_anthropic: false, has_vertexai: true,  has_ollama: false, has_openai: false);
+image_tests!(fedora_opencode_vertexai,fedora_opencode_vertexai_image,has_claude: false, has_opencode: true,  has_codex: false, has_anthropic: false, has_vertexai: true,  has_ollama: false, has_openai: false);
+image_tests!(ubi,                     ubi_image,                     has_claude: false, has_opencode: false, has_codex: false, has_anthropic: false, has_vertexai: false, has_ollama: false, has_openai: false);
+image_tests!(ubi_claude,              ubi_claude_image,              has_claude: true,  has_opencode: false, has_codex: false, has_anthropic: true,  has_vertexai: false, has_ollama: false, has_openai: false);
+image_tests!(ubi_opencode,            ubi_opencode_image,            has_claude: false, has_opencode: true,  has_codex: false, has_anthropic: true,  has_vertexai: false, has_ollama: false, has_openai: false);
+image_tests!(ubi_claude_vertexai,     ubi_claude_vertexai_image,     has_claude: true,  has_opencode: false, has_codex: false, has_anthropic: false, has_vertexai: true,  has_ollama: false, has_openai: false);
+image_tests!(ubi_opencode_vertexai,   ubi_opencode_vertexai_image,   has_claude: false, has_opencode: true,  has_codex: false, has_anthropic: false, has_vertexai: true,  has_ollama: false, has_openai: false);
+image_tests!(hummingbird,                     hummingbird_image,                     has_claude: false, has_opencode: false, has_codex: false, has_anthropic: false, has_vertexai: false, has_ollama: false, has_openai: false);
+image_tests!(hummingbird_claude,              hummingbird_claude_image,              has_claude: true,  has_opencode: false, has_codex: false, has_anthropic: true,  has_vertexai: false, has_ollama: false, has_openai: false);
+image_tests!(hummingbird_opencode,            hummingbird_opencode_image,            has_claude: false, has_opencode: true,  has_codex: false, has_anthropic: true,  has_vertexai: false, has_ollama: false, has_openai: false);
+image_tests!(hummingbird_claude_vertexai,     hummingbird_claude_vertexai_image,     has_claude: true,  has_opencode: false, has_codex: false, has_anthropic: false, has_vertexai: true,  has_ollama: false, has_openai: false);
+image_tests!(hummingbird_opencode_vertexai,   hummingbird_opencode_vertexai_image,   has_claude: false, has_opencode: true,  has_codex: false, has_anthropic: false, has_vertexai: true,  has_ollama: false, has_openai: false);
+image_tests!(ubuntu_opencode_ollama,          ubuntu_opencode_ollama_image,          has_claude: false, has_opencode: true,  has_codex: false, has_anthropic: false, has_vertexai: false, has_ollama: true,  has_openai: false);
+image_tests!(fedora_opencode_ollama,          fedora_opencode_ollama_image,          has_claude: false, has_opencode: true,  has_codex: false, has_anthropic: false, has_vertexai: false, has_ollama: true,  has_openai: false);
+image_tests!(ubi_opencode_ollama,             ubi_opencode_ollama_image,             has_claude: false, has_opencode: true,  has_codex: false, has_anthropic: false, has_vertexai: false, has_ollama: true,  has_openai: false);
+image_tests!(hummingbird_opencode_ollama,     hummingbird_opencode_ollama_image,     has_claude: false, has_opencode: true,  has_codex: false, has_anthropic: false, has_vertexai: false, has_ollama: true,  has_openai: false);
+image_tests!(ubuntu_opencode_openai,          ubuntu_opencode_openai_image,          has_claude: false, has_opencode: true,  has_codex: false, has_anthropic: false, has_vertexai: false, has_ollama: false, has_openai: true);
+image_tests!(fedora_opencode_openai,          fedora_opencode_openai_image,          has_claude: false, has_opencode: true,  has_codex: false, has_anthropic: false, has_vertexai: false, has_ollama: false, has_openai: true);
+image_tests!(ubi_opencode_openai,             ubi_opencode_openai_image,             has_claude: false, has_opencode: true,  has_codex: false, has_anthropic: false, has_vertexai: false, has_ollama: false, has_openai: true);
+image_tests!(hummingbird_opencode_openai,     hummingbird_opencode_openai_image,     has_claude: false, has_opencode: true,  has_codex: false, has_anthropic: false, has_vertexai: false, has_ollama: false, has_openai: true);
+image_tests!(ubuntu_codex,              ubuntu_codex_image,              has_claude: false, has_opencode: false, has_codex: true,  has_anthropic: false, has_vertexai: false, has_ollama: false, has_openai: true);
+image_tests!(fedora_codex,              fedora_codex_image,              has_claude: false, has_opencode: false, has_codex: true,  has_anthropic: false, has_vertexai: false, has_ollama: false, has_openai: true);
+image_tests!(ubi_codex,                 ubi_codex_image,                 has_claude: false, has_opencode: false, has_codex: true,  has_anthropic: false, has_vertexai: false, has_ollama: false, has_openai: true);
+image_tests!(hummingbird_codex,         hummingbird_codex_image,         has_claude: false, has_opencode: false, has_codex: true,  has_anthropic: false, has_vertexai: false, has_ollama: false, has_openai: true);
 
 // ---------------------------------------------------------------------------
 // Workspace helpers for feature-based builds
@@ -1350,6 +1396,69 @@ fn hummingbird_opencode_openai_image() -> &'static str {
                 config.path().to_str().unwrap(),
                 "--agent",
                 "opencode",
+                "--inference",
+                "openai",
+                "--with-policy",
+            ],
+        )
+    })
+}
+
+fn ubuntu_codex_image() -> &'static str {
+    UBUNTU_CODEX_IMAGE.get_or_init(|| {
+        build_image(
+            "openshell-test-ubuntu-codex:integration",
+            &["--agent", "codex", "--inference", "openai", "--with-policy"],
+        )
+    })
+}
+
+fn fedora_codex_image() -> &'static str {
+    FEDORA_CODEX_IMAGE.get_or_init(|| {
+        let config = fedora_config_dir();
+        build_image(
+            "openshell-test-fedora-codex:integration",
+            &[
+                "--config",
+                config.path().to_str().unwrap(),
+                "--agent",
+                "codex",
+                "--inference",
+                "openai",
+                "--with-policy",
+            ],
+        )
+    })
+}
+
+fn ubi_codex_image() -> &'static str {
+    UBI_CODEX_IMAGE.get_or_init(|| {
+        let config = ubi_config_dir();
+        build_image(
+            "openshell-test-ubi-codex:integration",
+            &[
+                "--config",
+                config.path().to_str().unwrap(),
+                "--agent",
+                "codex",
+                "--inference",
+                "openai",
+                "--with-policy",
+            ],
+        )
+    })
+}
+
+fn hummingbird_codex_image() -> &'static str {
+    HUMMINGBIRD_CODEX_IMAGE.get_or_init(|| {
+        let config = hummingbird_config_dir();
+        build_image(
+            "openshell-test-hummingbird-codex:integration",
+            &[
+                "--config",
+                config.path().to_str().unwrap(),
+                "--agent",
+                "codex",
                 "--inference",
                 "openai",
                 "--with-policy",
@@ -2091,6 +2200,58 @@ mod opencode_openai {
 }
 
 // ---------------------------------------------------------------------------
+// Codex + OpenAI integration tests
+// ---------------------------------------------------------------------------
+
+mod codex_openai {
+    use super::*;
+
+    #[test]
+    #[ignore]
+    fn codex_with_anthropic_inference_is_rejected() {
+        let binary = env!("CARGO_BIN_EXE_openshell-image-builder");
+        let status = Command::new(binary)
+            .args([
+                "--runtime",
+                "podman",
+                "--agent",
+                "codex",
+                "--inference",
+                "anthropic",
+                "should-not-be-built:test",
+            ])
+            .status()
+            .expect("binary should run");
+        assert!(
+            !status.success(),
+            "building with --agent codex --inference anthropic should fail"
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn codex_with_ollama_inference_is_rejected() {
+        let binary = env!("CARGO_BIN_EXE_openshell-image-builder");
+        let status = Command::new(binary)
+            .args([
+                "--runtime",
+                "podman",
+                "--agent",
+                "codex",
+                "--inference",
+                "ollama",
+                "should-not-be-built:test",
+            ])
+            .status()
+            .expect("binary should run");
+        assert!(
+            !status.success(),
+            "building with --agent codex --inference ollama should fail"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
 // --model integration tests
 // ---------------------------------------------------------------------------
 
@@ -2102,6 +2263,7 @@ static UBUNTU_CLAUDE_ANTHROPIC_MODEL_IMAGE: OnceLock<String> = OnceLock::new();
 static UBUNTU_CLAUDE_VERTEXAI_MODEL_IMAGE: OnceLock<String> = OnceLock::new();
 static UBUNTU_OPENCODE_ANTHROPIC_MODEL_IMAGE: OnceLock<String> = OnceLock::new();
 static UBUNTU_OPENCODE_OLLAMA_MODEL_IMAGE: OnceLock<String> = OnceLock::new();
+static UBUNTU_CODEX_OPENAI_MODEL_IMAGE: OnceLock<String> = OnceLock::new();
 
 fn ubuntu_claude_anthropic_model_image() -> &'static str {
     UBUNTU_CLAUDE_ANTHROPIC_MODEL_IMAGE.get_or_init(|| {
@@ -2165,6 +2327,23 @@ fn ubuntu_opencode_ollama_model_image() -> &'static str {
                 "ollama",
                 "--model",
                 MODEL_OLLAMA,
+                "--with-agent-settings",
+            ],
+        )
+    })
+}
+
+fn ubuntu_codex_openai_model_image() -> &'static str {
+    UBUNTU_CODEX_OPENAI_MODEL_IMAGE.get_or_init(|| {
+        build_image(
+            "openshell-test-ubuntu-codex-openai-model:integration",
+            &[
+                "--agent",
+                "codex",
+                "--inference",
+                "openai",
+                "--model",
+                MODEL_OPENAI,
                 "--with-agent-settings",
             ],
         )
@@ -2415,6 +2594,50 @@ mod model_opencode_openai {
     }
 }
 
+// codex + openai + model: .codex/config.toml written with "model" field
+mod model_codex_openai {
+    use super::*;
+
+    #[test]
+    #[ignore]
+    fn config_toml_present() {
+        let out = run_in_image(
+            ubuntu_codex_openai_model_image(),
+            "test -f /sandbox/.codex/config.toml",
+        );
+        assert!(
+            out.status.success(),
+            ".codex/config.toml not found when built with --inference openai --model"
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn config_toml_contains_model() {
+        let cmd = format!("grep -q '{}' /sandbox/.codex/config.toml", MODEL_OPENAI);
+        let out = run_in_image(ubuntu_codex_openai_model_image(), &cmd);
+        assert!(
+            out.status.success(),
+            "model value not found in .codex/config.toml"
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn config_toml_owned_by_sandbox() {
+        let out = run_in_image(
+            ubuntu_codex_openai_model_image(),
+            "stat -c '%U' /sandbox/.codex/config.toml",
+        );
+        assert!(out.status.success(), "failed to stat .codex/config.toml");
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout).trim(),
+            "sandbox",
+            ".codex/config.toml not owned by sandbox"
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // --endpoint integration tests
 // ---------------------------------------------------------------------------
@@ -2425,6 +2648,7 @@ const OLLAMA_CUSTOM_ENDPOINT: &str = "http://localhost:9999/v1";
 static UBUNTU_CLAUDE_ANTHROPIC_ENDPOINT_IMAGE: OnceLock<String> = OnceLock::new();
 static UBUNTU_OPENCODE_ANTHROPIC_ENDPOINT_IMAGE: OnceLock<String> = OnceLock::new();
 static UBUNTU_OPENCODE_OLLAMA_CUSTOM_ENDPOINT_IMAGE: OnceLock<String> = OnceLock::new();
+static UBUNTU_CODEX_OPENAI_ENDPOINT_IMAGE: OnceLock<String> = OnceLock::new();
 
 fn ubuntu_claude_anthropic_endpoint_image() -> &'static str {
     UBUNTU_CLAUDE_ANTHROPIC_ENDPOINT_IMAGE.get_or_init(|| {
@@ -2474,6 +2698,23 @@ fn ubuntu_opencode_ollama_custom_endpoint_image() -> &'static str {
                 OLLAMA_CUSTOM_ENDPOINT,
                 "--with-policy",
                 "--with-agent-settings",
+            ],
+        )
+    })
+}
+
+fn ubuntu_codex_openai_endpoint_image() -> &'static str {
+    UBUNTU_CODEX_OPENAI_ENDPOINT_IMAGE.get_or_init(|| {
+        build_image(
+            "openshell-test-ubuntu-codex-openai-endpoint:integration",
+            &[
+                "--agent",
+                "codex",
+                "--inference",
+                "openai",
+                "--endpoint",
+                "https://my-openai-proxy.example.com",
+                "--with-policy",
             ],
         )
     })
@@ -2601,6 +2842,22 @@ mod endpoint_opencode_ollama_custom {
         assert!(
             out.status.success(),
             "rewritten endpoint URL not found in opencode config.json"
+        );
+    }
+}
+
+// codex + openai + custom endpoint: OPENAI_BASE_URL baked in
+mod endpoint_codex_openai {
+    use super::*;
+
+    #[test]
+    #[ignore]
+    fn openai_base_url_env_set_to_proxy() {
+        let cmd = "test \"$OPENAI_BASE_URL\" = \"https://my-openai-proxy.example.com\"";
+        let out = run_in_image(ubuntu_codex_openai_endpoint_image(), cmd);
+        assert!(
+            out.status.success(),
+            "OPENAI_BASE_URL is not set to the proxy URL in the image"
         );
     }
 }
@@ -2860,6 +3117,12 @@ fn cleanup_images() {
         "openshell-test-fedora-ssl-certs:integration",
         "openshell-test-ubuntu-no-certs:integration",
         "openshell-test-fedora-no-certs:integration",
+        "openshell-test-ubuntu-codex:integration",
+        "openshell-test-fedora-codex:integration",
+        "openshell-test-ubi-codex:integration",
+        "openshell-test-hummingbird-codex:integration",
+        "openshell-test-ubuntu-codex-openai-model:integration",
+        "openshell-test-ubuntu-codex-openai-endpoint:integration",
     ] {
         Command::new("podman")
             .args(["rmi", "--force", tag])

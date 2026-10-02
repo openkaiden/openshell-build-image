@@ -13,6 +13,7 @@ End-to-end checklist for making a new AI coding agent available via `--agent`.
 Adding a new agent touches five layers: the agent module, `src/agent/mod.rs`, unit tests, integration tests (including extending the `image_tests!` macro), and the README. The existing agents are the canonical reference:
 
 - **`claude`** — Claude Code CLI, curl installer, onboarding skip via `.claude.json`, agent-level network policy, anthropic+vertexai inference, skills at `/sandbox/.claude/skills`.
+- **`codex`** — OpenAI Codex CLI, Node.js + npm installer, openai inference, model via `.codex/config.toml`, endpoint via `OPENAI_BASE_URL` env var, no skills support.
 - **`opencode`** — Opencode CLI, curl installer, per-inference config submodule pattern (one `configure()` per provider), all three inference providers, skills at `/sandbox/.opencode/skills`.
 
 ## Step 1 — choose the file structure
