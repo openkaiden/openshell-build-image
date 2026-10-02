@@ -4,7 +4,7 @@
 
 OpenShell ships a set of [pre-built sandbox images](https://github.com/NVIDIA/OpenShell-Community), but they are general-purpose. `openshell-image-builder` lets you build your own: lightweight, workspace-specific images that contain only what you need — without writing a Containerfile by hand.
 
-The tool assembles the image in layers — base image, agent installation, agent settings, OpenShell network policy, and project-specific toolchains. Use `--runtime` to select which container CLI drives the build (`podman`, `docker`, or the macOS `container` CLI):
+The tool assembles the image in layers — base image, agent installation, agent settings, OpenShell network policy, and project-specific toolchains. Use `--runtime` to select what drives the build: a container CLI on the host (`podman`, `docker`, or the macOS `container` CLI), or a microVM (`vm`) that needs no container runtime installed at all — see [Building in a VM](#building-in-a-vm---runtime-vm).
 
 1. **Base image** — Ubuntu, Fedora, Red Hat UBI, or Red Hat Hardened Images (HummingBird), any tag. Ubuntu 24.04 is the default.
 2. **Agent installation** (`--agent`) — the agent binary is pre-installed in `PATH`.
@@ -64,7 +64,89 @@ Build an image with a single command:
 openshell-image-builder --runtime podman myimage:latest
 ```
 
-`<TAG>` and `--runtime` are the only required arguments — `--runtime` selects the container CLI (`podman`, `docker`, or `container`), and `<TAG>` sets the tag for the built image. By default, the tool uses Ubuntu 24.04 as the base image.
+`<TAG>` and `--runtime` are the only required arguments — `--runtime` selects the build backend (`podman`, `docker`, `container`, or `vm`), and `<TAG>` sets the tag for the built image. By default, the tool uses Ubuntu 24.04 as the base image.
+
+## Building in a VM (`--runtime vm`)
+
+The three CLI runtimes hand the build to a container engine installed on your machine. `--runtime vm` instead boots a lightweight Linux microVM with [libkrun](https://github.com/containers/libkrun) and runs `buildah` inside it, so no container engine is needed on the host.
+
+The VM runs its own kernel in its own process namespace and sees only three directories you share with it: the VM's root filesystem, the build context, and the output directory. Nothing else on the host is reachable from the build.
+
+### What it produces
+
+This is the one way `--runtime vm` differs from the others in its result. A container CLI leaves a tagged image in its local image store. The VM has no access to that store, so it writes a **flattened rootfs tarball** instead:
+
+```sh
+openshell-image-builder --runtime vm myimage:latest
+# -> ./myimage-latest.tar
+```
+
+The default filename comes from `<TAG>`, with `:` and `/` replaced by `-`. Override it with `--vm-output`. Load the result into an image store yourself, or unpack it:
+
+```sh
+tar -xf myimage-latest.tar -C /path/to/rootfs
+```
+
+### Requirements
+
+`--runtime vm` works only on **macOS with Apple Silicon**, because libkrun builds on Apple's Hypervisor.framework. It also needs:
+
+1. **libkrun**, which the binary links against rather than bundling:
+
+   ```sh
+   brew tap libkrun/krun && brew trust libkrun/krun
+   brew install libkrun/krun/libkrun
+   ```
+
+   If a build fails with `Couldn't find or load libkrunfw`, add `export DYLD_LIBRARY_PATH="$(brew --prefix)/lib"`.
+
+2. **A binary built with the `vm` feature and signed for the hypervisor.** The `aarch64-apple-darwin` download from a release has both. To build one yourself:
+
+   ```sh
+   make build-vm
+   ```
+
+   The feature is off by default because it links against libkrun, and macOS refuses the hypervisor to an unsigned binary. `make build-vm` does both, and re-signs on every build, since compiling clears the signature.
+
+The VM's own root filesystem — a Linux tree with `buildah` in it — comes inside the binary and unpacks itself on first use, into `~/Library/Application Support/openshell-image-builder/vm-rootfs`.
+
+### Building the VM's root filesystem
+
+Only needed to change what the build VM contains. It takes Podman on a `linux/arm64` machine:
+
+```sh
+make build-vm-rootfs                  # writes vm-rootfs/ and vm-rootfs.tar
+make build-vm                         # embeds the tarball in the binary
+make run-vm TAG=myimage:latest        # builds an image with it
+```
+
+Or point at the directory without embedding anything: `--vm-rootfs ./vm-rootfs`. `make help` lists the rest.
+
+### Sizing the VM
+
+`buildah` uses the `vfs` storage driver inside the VM — virtio-fs does not support overlayfs — which stores a full copy of every layer rather than a diff. Builds therefore need more memory than the same build under overlayfs. If one fails with an out-of-memory message, raise it:
+
+```sh
+openshell-image-builder \
+  --runtime vm \
+  --vm-cpus 4 \
+  --vm-memory 8192 \
+  myimage:latest
+```
+
+### DNS inside the VM
+
+The VM has no virtual network card: libkrun forwards its connections to the host, which makes them for real. Nothing supplies the guest a `resolv.conf`, and a lookup still travels to whatever nameserver the guest is told to use — the host's resolver settings do not apply to it, only the host's routing and firewall rules.
+
+So the build reads the host's own nameservers on each run and hands them to the VM. That is what makes a build work behind a firewall that only allows DNS to the company resolver, and what lets a `FROM` line reach a registry mirror that only internal DNS knows about.
+
+Override it when the host's resolvers are not the ones the build should use:
+
+```sh
+openshell-image-builder --runtime vm --vm-dns 10.0.0.53 --vm-dns 10.0.0.54 myimage:latest
+```
+
+A loopback address is rejected: inside the VM, loopback is the VM. If the host resolves through one — systemd-resolved, a VPN client's local stub — pass the address it forwards to instead. When the host has no usable nameserver at all, the VM falls back to `1.1.1.1`.
 
 ## Configuring the base image
 
@@ -567,7 +649,7 @@ openshell-image-builder [OPTIONS] <TAG>
 | Argument / Option              | Description                                                        |
 | ------------------------------ | ------------------------------------------------------------------ |
 | `<TAG>`                        | Tag for the built image (e.g. `myimage:latest`)                    |
-| `--runtime <RUNTIME>`          | Container CLI to use for building images (`podman`, `docker`, `container`) |
+| `--runtime <RUNTIME>`          | Backend to build the image with (`podman`, `docker`, `container`, `vm` — see [Building in a VM](#building-in-a-vm---runtime-vm)) |
 | `--config <CONFIG>`            | Path to config directory containing `config.toml` (env: `OPENSHELL_IMAGE_BUILDER_CONFIG`) |
 | `--agent <AGENT>`              | Agent to install in the image (`claude`, `opencode`)               |
 | `--inference <INFERENCE>`      | Inference server the agent will connect to (`anthropic`, `vertexai`, `ollama`, `openai`) |
@@ -578,7 +660,14 @@ openshell-image-builder [OPTIONS] <TAG>
 | `--with-agent-settings`        | Generate and include agent settings in the image (see [Agent settings](#agent-settings)) |
 | `--ssl-certs <FILE>`           | Use a specific CA bundle instead of the auto-discovered one (see [Corporate proxy support](#corporate-proxy-support---ssl-certs)). The build fails immediately if the file does not exist. |
 | `--disable-ssl-certs`          | Disable bundling CA certificates into the image. By default, the tool auto-discovers and includes system CA certificates. |
+| `--vm-rootfs <DIR>`            | Root filesystem the build VM boots from (`--runtime vm` only). Defaults to the one embedded in the binary. |
+| `--vm-output <FILE>`           | Path for the rootfs tarball produced by `--runtime vm`. Defaults to a name derived from `<TAG>` in the current directory. |
+| `--vm-cpus <N>`                | vCPUs given to the build VM (`--runtime vm` only). Default `2`.     |
+| `--vm-memory <MIB>`            | RAM in MiB given to the build VM (`--runtime vm` only). Default `4096`. |
+| `--vm-dns <ADDR>`              | Nameserver the build VM resolves through (`--runtime vm` only). Repeatable. Defaults to the host's own nameservers. |
 | `-v` / `-vv`                   | Increase log verbosity (info / debug)                              |
+
+The five `--vm-*` options are rejected with any other `--runtime`, rather than silently ignored.
 
 ## Examples
 

@@ -22,8 +22,30 @@ on:
       - "v*"
 
 jobs:
+  # The root filesystem the vm runtime boots from, embedded into the one
+  # binary that can use it. Building it needs podman on native arm64, so it
+  # cannot happen on the macOS job that consumes it.
+  build-rootfs:
+    name: Build the VM rootfs
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install podman
+        run: sudo apt-get update && sudo apt-get install -y podman
+
+      - name: Build VM rootfs
+        run: ./crates/vm-image-builder/vm-image/make-rootfs.sh ./vm-rootfs ./vm-rootfs.tar
+
+      - name: Upload rootfs
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: vm-rootfs
+          path: vm-rootfs.tar
+
   build:
     runs-on: ${{ matrix.runner }}
+    needs: build-rootfs
     strategy:
       matrix:
         include:
@@ -34,8 +56,11 @@ jobs:
             use_cross: true
           - target: x86_64-apple-darwin
             runner: macos-26
+          # libkrun builds on Hypervisor.framework, which exists only here, so
+          # this is the only target that ships `--runtime vm`.
           - target: aarch64-apple-darwin
             runner: macos-26
+            vm: true
           - target: x86_64-pc-windows-msvc
             runner: windows-2025-vs2026
           - target: aarch64-pc-windows-msvc
@@ -62,9 +87,47 @@ jobs:
         if: matrix.use_cross == true
         run: cargo install cross --locked
 
+      # Only for the vm target. The compile guard in vm-runtime.yml runs the
+      # same install on every pull request, so a tap that stops publishing a
+      # bottle for this runner shows up there rather than in a release.
+      - name: Install libkrun
+        if: matrix.vm == true
+        run: |
+          brew tap libkrun/krun
+          brew trust libkrun/krun
+          brew install libkrun/krun/libkrun pkgconf
+
+      - name: Set build environment
+        if: matrix.vm == true
+        run: |
+          PREFIX=$(brew --prefix)
+          # krun-sys generates its bindings with bindgen, which needs libclang.
+          if [ -d "$PREFIX/opt/llvm/lib" ]; then
+            LIBCLANG="$PREFIX/opt/llvm/lib"
+          else
+            LIBCLANG="$(xcode-select -p)/usr/lib"
+          fi
+          echo "LIBCLANG_PATH=$LIBCLANG" >> "$GITHUB_ENV"
+          echo "DYLD_FALLBACK_LIBRARY_PATH=$LIBCLANG:$PREFIX/lib" >> "$GITHUB_ENV"
+          echo "PKG_CONFIG_PATH=$PREFIX/lib/pkgconfig" >> "$GITHUB_ENV"
+
+      - name: Download rootfs
+        if: matrix.vm == true
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: vm-rootfs
+
       - name: Build
-        if: matrix.use_cross != true
+        if: matrix.use_cross != true && matrix.vm != true
         run: cargo build --release --target ${{ matrix.target }}
+
+      # The rootfs is embedded here, so the released binary boots a VM without
+      # the user building a filesystem for it first.
+      - name: Build (vm)
+        if: matrix.vm == true
+        run: cargo build --release --target ${{ matrix.target }} --features vm
+        env:
+          OPENSHELL_IMAGE_BUILDER_VM_ROOTFS_ARCHIVE: ${{ github.workspace }}/vm-rootfs.tar
 
       - name: Build (cross)
         if: matrix.use_cross == true
@@ -90,7 +153,7 @@ jobs:
           security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
 
       - name: Sign binary
-        if: runner.os == 'macOS'
+        if: runner.os == 'macOS' && matrix.vm != true
         run: |
           IDENTITY=$(security find-identity -v -p codesigning "$RUNNER_TEMP/signing.keychain-db" \
             | grep "Developer ID Application" \
@@ -101,6 +164,27 @@ jobs:
             --sign "$IDENTITY" \
             --options runtime \
             target/${{ matrix.target }}/release/openshell-image-builder
+
+      # macOS denies Hypervisor.framework to any process whose signature lacks
+      # the entitlement, so the vm binary carries it. Read it back rather than
+      # trusting codesign to have applied it: without it the binary ships and
+      # fails only when a user asks for a VM build.
+      - name: Sign binary (vm)
+        if: matrix.vm == true
+        run: |
+          IDENTITY=$(security find-identity -v -p codesigning "$RUNNER_TEMP/signing.keychain-db" \
+            | grep "Developer ID Application" \
+            | awk '{print $2}')
+          codesign \
+            --deep \
+            --force \
+            --sign "$IDENTITY" \
+            --options runtime \
+            --entitlements entitlements.plist \
+            target/${{ matrix.target }}/release/openshell-image-builder
+          codesign -d --entitlements :- \
+            target/${{ matrix.target }}/release/openshell-image-builder | \
+            grep -q "com.apple.security.hypervisor"
 
       - name: Notarize binary
         if: runner.os == 'macOS'

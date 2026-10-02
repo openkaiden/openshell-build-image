@@ -1,0 +1,256 @@
+# Copyright (C) 2026 Red Hat, Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# SPDX-License-Identifier: Apache-2.0
+
+name: VM Runtime
+
+# Covers `--runtime vm`, which pr-check.yml cannot: the `vm` feature is off by
+# default, so the libkrun FFI code is never compiled there.
+#
+# Prerequisites — one-time configuration required before the `integration`
+# job can run:
+#
+# 1. Self-hosted runner (Settings → Actions → Runners → New self-hosted runner)
+#    A bare-metal macOS arm64 machine with kern.hv_support=1 is required.
+#    GitHub-hosted macOS runners are themselves virtual machines
+#    (kern.hv_support=0), so Hypervisor.framework is unavailable there and
+#    krun_start_enter fails with EINVAL.
+#    Register the runner with labels: macos, arm64
+#    (the self-hosted label is added automatically).
+#
+#    Install the build prerequisites on it once:
+#      brew tap libkrun/krun && brew trust libkrun/krun
+#      brew install libkrun/krun/libkrun pkgconf
+#    Compiling also needs libclang, from either `brew install llvm` or the
+#    Xcode Command Line Tools.
+#
+# 2. Environment with required reviewers (Settings → Environments → New environment)
+#    Name: integration
+#    Enable "Required reviewers" and add maintainers as reviewers.
+#    Without this, a pull request from an untrusted contributor could run
+#    arbitrary code on the self-hosted machine — a cargo build alone is enough,
+#    since build scripts execute during it.
+#
+# Until both exist that job stays queued; `build` and `build-rootfs` run on
+# hosted runners and are unaffected.
+#
+# Note on installing libkrun: the tap declares `depends_on arch: :arm64` and
+# publishes libkrunfw bottles only for arm64_sequoia and arm64_tahoe. Anywhere
+# else Homebrew falls back to building from source, and building libkrunfw
+# means compiling a kernel. `build` therefore installs libkrun on the hosted
+# runner but fails if the install was not poured from a bottle, so that a
+# runner image the tap does not cover is reported rather than waited on.
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  # Compile guard. Booting a VM needs bare metal; compiling the FFI code only
+  # needs libkrun to link against, which a hosted runner can install. Keeping
+  # this job hosted means a compile error does not wait behind the approval
+  # gate the integration job carries, and it holds the release pipeline to the
+  # same requirement: release.yml builds on hosted runners too, so a VM-capable
+  # release is possible only for as long as this job keeps passing.
+  build:
+    name: Build with the vm feature
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # No job here runs an authenticated git command, and the
+          # self-hosted runner would otherwise keep the token in the
+          # checkout it just filled with pull-request code.
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1 stable
+        with:
+          toolchain: stable
+          components: clippy
+
+      - name: Install libkrun
+        run: |
+          brew tap libkrun/krun
+          brew trust libkrun/krun
+          brew install libkrun/krun/libkrun pkgconf
+
+      # The tap publishes libkrunfw bottles for a fixed set of macOS versions.
+      # Off that set Homebrew builds from source, and building libkrunfw means
+      # compiling a Linux kernel — too slow and too brittle for this job or for
+      # a release. Fail plainly rather than quietly taking minutes.
+      - name: Require a bottled libkrunfw
+        run: |
+          installed=$(brew info --json=v2 libkrun/krun/libkrunfw | python3 -c \
+            'import json,sys; i=json.load(sys.stdin)["formulae"][0]["installed"][0]; print(i["version"], i["poured_from_bottle"])')
+          echo "libkrunfw $installed"
+          case "$installed" in
+            *True) ;;
+            *) echo "::error::libkrunfw was built from source rather than poured from a bottle — see the note at the top of this workflow"
+               exit 1 ;;
+          esac
+
+      - name: Set build environment
+        run: |
+          PREFIX=$(brew --prefix)
+          # krun-sys generates its bindings with bindgen, which needs libclang.
+          # Prefer a Homebrew llvm, else fall back to the Command Line Tools
+          # copy that every Xcode install provides.
+          if [ -d "$PREFIX/opt/llvm/lib" ]; then
+            LIBCLANG="$PREFIX/opt/llvm/lib"
+          else
+            LIBCLANG="$(xcode-select -p)/usr/lib"
+          fi
+          echo "LIBCLANG_PATH=$LIBCLANG" >> "$GITHUB_ENV"
+          echo "DYLD_FALLBACK_LIBRARY_PATH=$LIBCLANG:$PREFIX/lib" >> "$GITHUB_ENV"
+          echo "PKG_CONFIG_PATH=$PREFIX/lib/pkgconfig" >> "$GITHUB_ENV"
+
+      # A runner image changes under us over time, so say plainly what is
+      # missing rather than leaving it to a build-script error deep in cargo.
+      - name: Check prerequisites
+        run: |
+          missing=""
+          [ -f "$LIBCLANG_PATH/libclang.dylib" ] || missing="$missing libclang"
+          command -v pkg-config >/dev/null 2>&1 || missing="$missing pkg-config"
+          pkg-config --exists libkrun 2>/dev/null || missing="$missing libkrun"
+          if [ -n "$missing" ]; then
+            echo "::error::missing on this runner:$missing — see the setup notes in this workflow"
+            exit 1
+          fi
+
+      - name: Clippy and test
+        run: make check-vm
+
+      # `make build-vm` signs what it builds and fails if the entitlement did not
+      # apply, so this covers the signing path a release depends on. With no
+      # tarball in the working copy it also covers building with no rootfs
+      # embedded, which is what every non-release build does.
+      - name: Build, sign, and check the entitlement
+        run: make build-vm
+
+  # The VM boots from a Linux rootfs with buildah installed. Building it needs
+  # podman on native arm64, which the macOS runners do not have.
+  build-rootfs:
+    name: Build the VM rootfs
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # No job here runs an authenticated git command, and the
+          # self-hosted runner would otherwise keep the token in the
+          # checkout it just filled with pull-request code.
+          persist-credentials: false
+
+      - name: Install podman
+        run: sudo apt-get update && sudo apt-get install -y podman
+
+      # The tarball is what the release binary embeds, and it doubles as the
+      # artifact format: upload-artifact zips its input, which drops symlinks
+      # and the executable bit — both of which a bootable rootfs needs.
+      - name: Build VM rootfs
+        run: make build-vm-rootfs
+
+      - name: Upload rootfs
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: vm-rootfs
+          path: vm-rootfs.tar
+
+  # The only job that actually boots a VM, so the only one needing bare metal.
+  integration:
+    name: Build an image in a VM
+    runs-on: [self-hosted, macos, arm64]
+    needs: build-rootfs
+    environment: integration # requires maintainer approval before the job runs
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # No job here runs an authenticated git command, and the
+          # self-hosted runner would otherwise keep the token in the
+          # checkout it just filled with pull-request code.
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1 stable
+        with:
+          toolchain: stable
+
+      - name: Set build environment
+        run: |
+          PREFIX=$(brew --prefix)
+          if [ -d "$PREFIX/opt/llvm/lib" ]; then
+            LIBCLANG="$PREFIX/opt/llvm/lib"
+          else
+            LIBCLANG="$(xcode-select -p)/usr/lib"
+          fi
+          echo "LIBCLANG_PATH=$LIBCLANG" >> "$GITHUB_ENV"
+          echo "DYLD_FALLBACK_LIBRARY_PATH=$LIBCLANG:$PREFIX/lib" >> "$GITHUB_ENV"
+          echo "PKG_CONFIG_PATH=$PREFIX/lib/pkgconfig" >> "$GITHUB_ENV"
+          # libkrun dlopens its bundled kernel at run time, which no rpath
+          # covers — without this the VM fails with "Couldn't find or load
+          # libkrunfw".
+          echo "DYLD_LIBRARY_PATH=$PREFIX/lib" >> "$GITHUB_ENV"
+
+      - name: Check prerequisites
+        run: |
+          missing=""
+          [ -f "$LIBCLANG_PATH/libclang.dylib" ] || missing="$missing libclang"
+          command -v pkg-config >/dev/null 2>&1 || missing="$missing pkg-config"
+          pkg-config --exists libkrun 2>/dev/null || missing="$missing libkrun"
+          ls "$(brew --prefix)"/lib/libkrunfw*.dylib >/dev/null 2>&1 || missing="$missing libkrunfw"
+          # Hosted runners report 0 here; only bare metal can start a VM.
+          [ "$(sysctl -n kern.hv_support 2>/dev/null)" = "1" ] || missing="$missing hypervisor-support"
+          if [ -n "$missing" ]; then
+            echo "::error::missing on this runner:$missing — see the setup notes in this workflow"
+            exit 1
+          fi
+
+      - name: Download rootfs
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: vm-rootfs
+
+      # `make build-vm` embeds the tarball downloaded above, because it sits in the
+      # working copy, and signs the result. The job therefore proves what a
+      # released binary does: unpack its own rootfs and boot from it, with no
+      # rootfs on the machine to fall back on. The compile guard above has no
+      # tarball to find and so covers the other path.
+      - name: Build and sign binary
+        run: make build-vm
+
+      - name: Build an image in the VM
+        run: make run-vm TAG=openshell-vm-test:integration ARGS=-v
+
+      - name: Verify the exported rootfs
+        run: |
+          test -s ./target/openshell-vm-test-integration.tar
+          mkdir -p "$RUNNER_TEMP/vm-rootfs-check"
+          tar -xf ./target/openshell-vm-test-integration.tar -C "$RUNNER_TEMP/vm-rootfs-check" ./etc/passwd
+          # The generated Containerfile always creates the sandbox user the
+          # agent runs as, so its absence means the build produced the wrong
+          # filesystem rather than merely an empty one.
+          grep -q '^sandbox:' "$RUNNER_TEMP/vm-rootfs-check/etc/passwd"
+
+      # This runner is someone's own machine, and the exported rootfs is a few
+      # hundred MB. Do not leave it lying around, even when the job fails.
+      # That includes the build rootfs the binary unpacked for itself, which
+      # nothing else on this machine will ever use again. Only that directory
+      # is removed, never the one above it, which is where a maintainer's own
+      # config.toml lives.
+      - name: Clean up
+        if: always()
+        run: |
+          rm -rf ./vm-rootfs.tar ./target/openshell-vm-test-integration.tar "$RUNNER_TEMP/vm-rootfs-check"
+          rm -rf "$HOME/Library/Application Support/openshell-image-builder/vm-rootfs"

@@ -15,12 +15,20 @@
 # SPDX-License-Identifier: Apache-2.0
 
 [workspace]
-members = [".", "crates/container-image-builder"]
+members = [".", "crates/container-image-builder", "crates/vm-image-builder"]
 
 [package]
 name = "openshell-image-builder"
 version = "0.12.0-next"
 edition = "2024"
+
+[features]
+# Enables the `--runtime vm` backend. Off by default: it links against
+# libkrun, which must be installed at build time and only exists for macOS
+# on Apple Silicon. Without it `--runtime vm` parses but reports that the
+# binary was built without VM support.
+default = []
+vm = ["vm-image-builder/krun"]
 
 [dependencies]
 clap = { version = "4", features = ["derive", "env"] }
@@ -40,6 +48,14 @@ tempfile = "3"
 toml = "0.8"
 ureq = "2"
 url = "2"
+vm-image-builder = { path = "crates/vm-image-builder" }
+zstd = "0.13"
+
+# build.rs compresses the VM rootfs tarball it embeds and records a digest of
+# it, which `src/vm_rootfs.rs` uses as the cache key for its extraction.
+[build-dependencies]
+sha2 = "0.10"
+zstd = "0.13"
 
 [dev-dependencies]
 ctor = "0.2"

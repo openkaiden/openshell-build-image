@@ -10,6 +10,7 @@ Project-specific skills for openshell-image-builder.
 | [`integration-tests`](integration-tests/SKILL.md) | Run the integration tests in `tests/integration_test.rs` against real container images built with podman |
 | [`debug-image`](debug-image/SKILL.md) | Inspect a built test image interactively to diagnose a failing integration test — binaries, policy, config files, ownership |
 | [`sandbox-policy`](sandbox-policy/SKILL.md) | Understand and edit the sandbox policy — base YAML, network rule schema, inference and agent fragment merging, testing |
+| [`vm-runtime`](vm-runtime/SKILL.md) | Build, sign, and run the `--runtime vm` backend — the libkrun microVM, its embedded root filesystem, and the errors each step can produce |
 | [`update-github-action`](update-github-action/SKILL.md) | Add or update a GitHub Actions step — fetch the latest release SHA and write the correctly pinned uses line |
 | [`work-on-issue`](work-on-issue/SKILL.md) | Fetch an issue from the upstream repository, map it to existing skills, and produce an implementation plan |
 | [`coderabbit-review`](coderabbit-review/SKILL.md) | Fetch all CodeRabbitAI review comments on the current PR, triage by severity, and address the actionable ones |

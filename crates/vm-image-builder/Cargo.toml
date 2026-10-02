@@ -1,0 +1,44 @@
+# Copyright (C) 2026 Red Hat, Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "vm-image-builder"
+version = "0.1.0"
+edition = "2024"
+description = "Build container images inside a libkrun microVM and export them as a flattened rootfs tarball"
+license = "Apache-2.0"
+
+[features]
+# Off by default. `krun-sys` links against libkrun and generates its FFI
+# bindings with bindgen, so enabling this feature requires libkrun's headers
+# and libclang at build time. Without it the crate still compiles everywhere,
+# and `KrunRunner` reports the build as unsupported.
+default = []
+krun = ["dep:krun-sys"]
+
+[dependencies]
+log = "0.4"
+
+# Used for `fork`/`waitpid` in the krun backend and for `O_NOFOLLOW` when
+# writing the Containerfile into a caller-supplied build context.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+# libkrun uses Apple's Hypervisor.framework, which exists only on Apple Silicon.
+# Scoping the dependency to that target keeps `--features krun` from dragging
+# krun-sys into a Linux or Windows build.
+[target.'cfg(all(target_os = "macos", target_arch = "aarch64"))'.dependencies]
+krun-sys = { version = "1", optional = true }
