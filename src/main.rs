@@ -20,6 +20,7 @@ mod config;
 mod containerfile;
 mod feature;
 mod host;
+mod image_mount;
 mod inference;
 mod policy;
 mod workspace;
@@ -115,6 +116,12 @@ struct Cli {
         help = "Disable bundling CA certificates into the image."
     )]
     disable_ssl_certs: bool,
+    #[arg(
+        long,
+        action = clap::ArgAction::Append,
+        help = "Path or URL to a YAML file describing a container image to mount (may be repeated)"
+    )]
+    image_mount: Vec<String>,
 }
 
 fn main() {
@@ -139,6 +146,7 @@ fn main() {
     } else {
         Some(cli.ssl_certs.map(std::path::PathBuf::from))
     };
+    let image_mounts: Vec<&str> = cli.image_mount.iter().map(|s| s.as_str()).collect();
     if let Err(e) = run(
         &cli.tag,
         cli.config,
@@ -150,6 +158,7 @@ fn main() {
         cli.with_policy,
         cli.with_agent_settings,
         ssl_certs,
+        &image_mounts,
         &container_cli,
         &ContainerRunner,
     ) {
@@ -170,6 +179,7 @@ fn run(
     with_policy: bool,
     with_agent_settings: bool,
     ssl_certs: Option<Option<PathBuf>>,
+    image_mounts: &[&str],
     runtime: &ContainerCli,
     runner: &dyn Runner,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -238,15 +248,33 @@ fn run(
             true
         }
     };
+    let image_mount_inits: Vec<String> = image_mounts
+        .iter()
+        .map(|path_or_url| image_mount::load_init(path_or_url))
+        .collect::<Result<_, _>>()?;
+    let mut seen_names = std::collections::HashSet::new();
+    for path_or_url in image_mounts {
+        if let Some(name) = image_mount::mount_name(path_or_url)
+            && !seen_names.insert(name.clone())
+        {
+            return Err(format!(
+                "--image-mount: duplicate mount name '{name}' derived from '{path_or_url}'"
+            )
+            .into());
+        }
+    }
     let output = containerfile::generate(
         &config,
-        agent.as_deref(),
-        &features,
-        has_agent_settings,
-        &skill_names,
-        &agent_env_vars,
-        with_policy,
-        ca_certs_copied,
+        &containerfile::ContainerfileOptions {
+            agent: agent.as_deref(),
+            features: &features,
+            with_agent_settings: has_agent_settings,
+            skill_names: &skill_names,
+            env_vars: &agent_env_vars,
+            with_policy,
+            with_ca_certs: ca_certs_copied,
+            image_mount_inits: &image_mount_inits,
+        },
     )?;
     build(&output, tag, runtime, runner, context_dir.path())?;
     Ok(())
@@ -913,6 +941,7 @@ mod tests {
             false,
             false,
             None,
+            &[],
             &ContainerCli::Podman,
             &FakeRunner(0),
         );
@@ -933,6 +962,7 @@ mod tests {
             false,
             false,
             None,
+            &[],
             &ContainerCli::Podman,
             &FakeRunner(0),
         );
@@ -953,6 +983,7 @@ mod tests {
             false,
             false,
             None,
+            &[],
             &ContainerCli::Podman,
             &FakeRunner(0),
         );
@@ -973,6 +1004,7 @@ mod tests {
             false,
             false,
             None,
+            &[],
             &ContainerCli::Podman,
             &FakeRunner(0),
         );
@@ -999,6 +1031,7 @@ mod tests {
             false,
             false,
             None,
+            &[],
             &ContainerCli::Podman,
             &FakeRunner(1),
         );
@@ -1019,6 +1052,7 @@ mod tests {
             false,
             false,
             None,
+            &[],
             &ContainerCli::Podman,
             &FakeRunner(0),
         );
@@ -1045,6 +1079,7 @@ mod tests {
             false,
             false,
             None,
+            &[],
             &ContainerCli::Podman,
             &FakeRunner(0),
         );
@@ -1207,6 +1242,7 @@ mod tests {
             true,
             false,
             None,
+            &[],
             &ContainerCli::Podman,
             &FakeRunner(0),
         );
@@ -1227,6 +1263,7 @@ mod tests {
             false,
             true,
             None,
+            &[],
             &ContainerCli::Podman,
             &FakeRunner(0),
         );
@@ -1247,6 +1284,7 @@ mod tests {
             false,
             false,
             None,
+            &[],
             &ContainerCli::Podman,
             &FakeRunner(0),
         );
@@ -1257,6 +1295,89 @@ mod tests {
                 .to_string()
                 .contains("does not support the selected inference provider")
         );
+    }
+
+    #[test]
+    fn run_with_image_mount_from_file_succeeds() {
+        let yaml_dir = tempfile::tempdir().unwrap();
+        let yaml_path = yaml_dir.path().join("curl.yaml");
+        std::fs::write(
+            &yaml_path,
+            "image: docker.io/curlimages/curl:latest\ninit: export PATH=$MOUNT/usr/bin:$PATH\n",
+        )
+        .unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let result = run(
+            "test:latest",
+            Some(tmp.path().to_path_buf()),
+            false,
+            None,
+            None,
+            None,
+            None,
+            false,
+            false,
+            None,
+            &[yaml_path.to_str().unwrap()],
+            &ContainerCli::Podman,
+            &FakeRunner(0),
+        );
+        assert!(result.is_ok(), "expected Ok, got {result:?}");
+    }
+
+    #[test]
+    fn run_with_multiple_image_mounts_succeeds() {
+        let yaml_dir = tempfile::tempdir().unwrap();
+        let curl_path = yaml_dir.path().join("curl.yaml");
+        let jq_path = yaml_dir.path().join("jq.yaml");
+        std::fs::write(
+            &curl_path,
+            "image: docker.io/curlimages/curl:latest\ninit: export PATH=$MOUNT/usr/bin:$PATH\n",
+        )
+        .unwrap();
+        std::fs::write(
+            &jq_path,
+            "image: ghcr.io/jqlang/jq:latest\ninit: export PATH=$MOUNT/bin:$PATH\n",
+        )
+        .unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let result = run(
+            "test:latest",
+            Some(tmp.path().to_path_buf()),
+            false,
+            None,
+            None,
+            None,
+            None,
+            false,
+            false,
+            None,
+            &[curl_path.to_str().unwrap(), jq_path.to_str().unwrap()],
+            &ContainerCli::Podman,
+            &FakeRunner(0),
+        );
+        assert!(result.is_ok(), "expected Ok, got {result:?}");
+    }
+
+    #[test]
+    fn run_with_image_mount_invalid_path_returns_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let result = run(
+            "test:latest",
+            Some(tmp.path().to_path_buf()),
+            false,
+            None,
+            None,
+            None,
+            None,
+            false,
+            false,
+            None,
+            &["/nonexistent/path/tool.yaml"],
+            &ContainerCli::Podman,
+            &FakeRunner(0),
+        );
+        assert!(result.is_err(), "expected Err for missing image-mount file");
     }
 
     #[test]
@@ -1415,6 +1536,7 @@ mod tests {
             false,
             false,
             Some(None),
+            &[],
             &ContainerCli::Podman,
             &FakeRunner(0),
         );
@@ -1437,6 +1559,7 @@ mod tests {
             false,
             false,
             Some(Some(cert)),
+            &[],
             &ContainerCli::Podman,
             &FakeRunner(0),
         );
@@ -1457,6 +1580,7 @@ mod tests {
             false,
             false,
             Some(Some(PathBuf::from("/nonexistent/bundle.crt"))),
+            &[],
             &ContainerCli::Podman,
             &FakeRunner(0),
         );
@@ -1478,6 +1602,7 @@ mod tests {
             false,
             false,
             None,
+            &[],
             &ContainerCli::Podman,
             &capture,
         )

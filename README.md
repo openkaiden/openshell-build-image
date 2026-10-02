@@ -4,7 +4,7 @@
 
 OpenShell ships a set of [pre-built sandbox images](https://github.com/NVIDIA/OpenShell-Community), but they are general-purpose. `openshell-image-builder` lets you build your own: lightweight, workspace-specific images that contain only what you need — without writing a Containerfile by hand.
 
-The tool assembles the image in layers — base image, agent installation, agent settings, OpenShell network policy, and project-specific toolchains. Use `--runtime` to select which container CLI drives the build (`podman`, `docker`, or the macOS `container` CLI):
+The tool assembles the image in layers — base image, agent installation, agent settings, OpenShell network policy, project-specific toolchains, and image-mount init scripts. Use `--runtime` to select which container CLI drives the build (`podman`, `docker`, or the macOS `container` CLI):
 
 1. **Base image** — Ubuntu, Fedora, Red Hat UBI, or Red Hat Hardened Images (HummingBird), any tag. Ubuntu 24.04 is the default.
 2. **Agent installation** (`--agent`) — the agent binary is pre-installed in `PATH`.
@@ -21,6 +21,7 @@ The tool assembles the image in layers — base image, agent installation, agent
    - **Inference network rules** — LLM backend endpoints are added by `--inference`.
    - **Workspace network rules** — user-defined hosts declared in `.kaiden/workspace.json` are added to the policy when `--with-workspace-config` is used.
 5. **Installation of project-specific toolchains** — toolchains and utilities declared as Dev Container Features in `.kaiden/workspace.json` are installed in the image when `--with-workspace-config` is used.
+6. **Image-mount init scripts** (`--image-mount`) — shell init snippets from images-to-mount YAML files are appended to `/sandbox/.bashrc` and `/sandbox/.zshrc`.
 
 ### workspace.json fields
 
@@ -558,6 +559,53 @@ An invalid or unparseable host entry (e.g. a bare space or malformed URL) causes
 
 With this configuration, `cargo build` and `cargo fetch` inside the sandbox can download crate metadata and source tarballs.
 
+## Image-mount init scripts
+
+Use `--image-mount` to bake the initialisation snippet from an [images-to-mount](https://github.com/feloy/images-to-mount) YAML file into the image's shell startup files. The flag can be repeated to process multiple YAML files.
+
+### YAML format
+
+```yaml
+image: docker.io/curlimages/curl:latest   # the image to mount — not used by this tool
+init: export PATH=$MOUNT/usr/bin:$PATH    # shell snippet added to .bashrc and .zshrc
+```
+
+The `image` field is present in the file but is ignored by `openshell-image-builder`. Only the `init` field is read.
+
+`$MOUNT` in the `init` value is replaced at build time with `/sandbox/mnt/<name>`, where `<name>` is the filename stem of the YAML file — for example, `curl.yaml` → `/sandbox/mnt/curl`.
+
+### What gets written
+
+The resolved `init` snippet (with `$MOUNT` replaced) is appended to:
+
+- `/sandbox/.bashrc` — sourced by interactive bash sessions
+- `/sandbox/.zshrc` — sourced by interactive zsh sessions (created if it does not already exist)
+
+The append happens in the same `RUN` layer that creates the profile files, so both files are owned by the `sandbox` user.
+
+### Example
+
+```sh
+# From a local YAML file — mount name derived from filename: "curl"
+openshell-image-builder \
+  --runtime podman \
+  --image-mount /path/to/curl.yaml \
+  myimage:latest
+
+# From a URL
+openshell-image-builder \
+  --runtime podman \
+  --image-mount https://raw.githubusercontent.com/feloy/images-to-mount/main/curl.yaml \
+  myimage:latest
+
+# Multiple mounts — the flag can be repeated
+openshell-image-builder \
+  --runtime podman \
+  --image-mount /path/to/curl.yaml \
+  --image-mount /path/to/jq.yaml \
+  myimage:latest
+```
+
 ## Full option reference
 
 ```
@@ -578,6 +626,7 @@ openshell-image-builder [OPTIONS] <TAG>
 | `--with-agent-settings`        | Generate and include agent settings in the image (see [Agent settings](#agent-settings)) |
 | `--ssl-certs <FILE>`           | Use a specific CA bundle instead of the auto-discovered one (see [Corporate proxy support](#corporate-proxy-support---ssl-certs)). The build fails immediately if the file does not exist. |
 | `--disable-ssl-certs`          | Disable bundling CA certificates into the image. By default, the tool auto-discovers and includes system CA certificates. |
+| `--image-mount <PATH\|URL>`    | Append the `init` snippet from an images-to-mount YAML file to `.bashrc` and `.zshrc`; may be repeated (see [Image-mount init scripts](#image-mount-init-scripts)) |
 | `-v` / `-vv`                   | Increase log verbosity (info / debug)                              |
 
 ## Examples

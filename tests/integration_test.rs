@@ -119,6 +119,7 @@ static UBUNTU_SSL_CERTS_IMAGE: OnceLock<String> = OnceLock::new();
 static FEDORA_SSL_CERTS_IMAGE: OnceLock<String> = OnceLock::new();
 static UBUNTU_NO_CERTS_IMAGE: OnceLock<String> = OnceLock::new();
 static FEDORA_NO_CERTS_IMAGE: OnceLock<String> = OnceLock::new();
+static UBUNTU_IMAGE_MOUNT_IMAGE: OnceLock<String> = OnceLock::new();
 
 fn ssl_cert_fixture_path() -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/test-ca.crt")
@@ -1386,6 +1387,25 @@ fn ubuntu_claude_no_agent_settings_image() -> &'static str {
             "openshell-test-ubuntu-claude-no-agent-settings:integration",
             &["--agent", "claude"],
         )
+    })
+}
+
+fn ubuntu_image_mount_image() -> &'static str {
+    UBUNTU_IMAGE_MOUNT_IMAGE.get_or_init(|| {
+        // Write a temporary YAML file with a known name so the mount name is predictable.
+        let dir = tempfile::tempdir().unwrap();
+        let yaml_path = dir.path().join("curl.yaml");
+        std::fs::write(
+            &yaml_path,
+            "image: docker.io/curlimages/curl:latest\ninit: export PATH=$MOUNT/usr/bin:$PATH\n",
+        )
+        .unwrap();
+        let tag = build_image(
+            "openshell-test-ubuntu-image-mount:integration",
+            &["--image-mount", yaml_path.to_str().unwrap()],
+        );
+        // `dir` is dropped here; the image is already built so the file is no longer needed.
+        tag
     })
 }
 
@@ -2795,6 +2815,93 @@ mod ssl_certs {
 }
 
 // ---------------------------------------------------------------------------
+// --image-mount flag tests
+// ---------------------------------------------------------------------------
+
+mod image_mount {
+    use super::*;
+
+    #[test]
+    #[ignore]
+    fn bashrc_contains_init_with_resolved_mount_path() {
+        let out = run_in_image(
+            ubuntu_image_mount_image(),
+            "grep -q 'export PATH=/sandbox/mnt/curl/usr/bin' /sandbox/.bashrc",
+        );
+        assert!(
+            out.status.success(),
+            "resolved init not found in /sandbox/.bashrc"
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn zshrc_contains_init_with_resolved_mount_path() {
+        let out = run_in_image(
+            ubuntu_image_mount_image(),
+            "grep -q 'export PATH=/sandbox/mnt/curl/usr/bin' /sandbox/.zshrc",
+        );
+        assert!(
+            out.status.success(),
+            "resolved init not found in /sandbox/.zshrc"
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn bashrc_owned_by_sandbox() {
+        let out = run_in_image(ubuntu_image_mount_image(), "stat -c '%U' /sandbox/.bashrc");
+        assert!(out.status.success(), "failed to stat /sandbox/.bashrc");
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout).trim(),
+            "sandbox",
+            "/sandbox/.bashrc not owned by sandbox"
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn zshrc_owned_by_sandbox() {
+        let out = run_in_image(ubuntu_image_mount_image(), "stat -c '%U' /sandbox/.zshrc");
+        assert!(out.status.success(), "failed to stat /sandbox/.zshrc");
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout).trim(),
+            "sandbox",
+            "/sandbox/.zshrc not owned by sandbox"
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn base_image_without_flag_has_no_zshrc() {
+        let out = run_in_image(ubuntu_image(), "test -f /sandbox/.zshrc");
+        assert!(
+            !out.status.success(),
+            "/sandbox/.zshrc should not exist in an image built without --image-mount"
+        );
+    }
+
+    #[test]
+    fn invalid_path_exits_nonzero() {
+        let binary = env!("CARGO_BIN_EXE_openshell-image-builder");
+        let output = Command::new(binary)
+            .args([
+                "--runtime",
+                "podman",
+                "--image-mount",
+                "/nonexistent/path/tool.yaml",
+                "should-not-be-built:test",
+            ])
+            .output()
+            .expect("binary should run");
+        assert!(
+            !output.status.success(),
+            "--image-mount with nonexistent file must exit non-zero"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Cleanup — runs when the test process exits, after all tests complete
 // ---------------------------------------------------------------------------
 
@@ -2860,6 +2967,7 @@ fn cleanup_images() {
         "openshell-test-fedora-ssl-certs:integration",
         "openshell-test-ubuntu-no-certs:integration",
         "openshell-test-fedora-no-certs:integration",
+        "openshell-test-ubuntu-image-mount:integration",
     ] {
         Command::new("podman")
             .args(["rmi", "--force", tag])

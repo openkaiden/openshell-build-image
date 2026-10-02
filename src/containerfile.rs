@@ -37,16 +37,22 @@ impl std::fmt::Display for ContainerfileError {
 
 impl std::error::Error for ContainerfileError {}
 
-#[allow(clippy::too_many_arguments)]
+/// Options forwarded from the CLI that control the content of the generated Containerfile.
+pub struct ContainerfileOptions<'a> {
+    pub agent: Option<&'a dyn Agent>,
+    pub features: &'a [StagedFeature],
+    pub with_agent_settings: bool,
+    pub skill_names: &'a [String],
+    pub env_vars: &'a HashMap<String, String>,
+    pub with_policy: bool,
+    pub with_ca_certs: bool,
+    /// Shell init snippets, one per `--image-mount` YAML, with `$MOUNT` already resolved.
+    pub image_mount_inits: &'a [String],
+}
+
 pub fn generate(
     config: &Config,
-    agent: Option<&dyn Agent>,
-    features: &[StagedFeature],
-    with_agent_settings: bool,
-    skill_names: &[String],
-    env_vars: &HashMap<String, String>,
-    with_policy: bool,
-    with_ca_certs: bool,
+    opts: &ContainerfileOptions<'_>,
 ) -> Result<String, ContainerfileError> {
     let tag = &config.base_image.tag;
     let system_stage = match config.base_image.image.as_str() {
@@ -68,7 +74,7 @@ pub fn generate(
                 "traceroute",
                 "which",
             ],
-            with_ca_certs,
+            opts.with_ca_certs,
         ),
         "ubi" => dnf_system_stage(
             "registry.access.redhat.com/ubi10/ubi",
@@ -84,7 +90,7 @@ pub fn generate(
                 "procps-ng",
                 "which",
             ],
-            with_ca_certs,
+            opts.with_ca_certs,
         ),
         "hummingbird" => dnf_system_stage(
             "registry.access.redhat.com/hi/core-runtime",
@@ -97,9 +103,9 @@ pub fn generate(
                 "which",
                 "tar",
             ],
-            with_ca_certs,
+            opts.with_ca_certs,
         ),
-        "ubuntu" => ubuntu_system_stage(tag, with_ca_certs),
+        "ubuntu" => ubuntu_system_stage(tag, opts.with_ca_certs),
         image => {
             return Err(ContainerfileError::NotSupported {
                 image: image.to_string(),
@@ -109,12 +115,13 @@ pub fn generate(
     Ok(format!(
         "{system_stage}\n{}",
         final_stage(
-            agent,
-            features,
-            with_agent_settings,
-            skill_names,
-            env_vars,
-            with_policy
+            opts.agent,
+            opts.features,
+            opts.with_agent_settings,
+            opts.skill_names,
+            opts.env_vars,
+            opts.with_policy,
+            opts.image_mount_inits,
         )
     ))
 }
@@ -260,6 +267,19 @@ RUN groupadd -r supervisor && useradd -r -g supervisor -s /usr/sbin/nologin supe
     )
 }
 
+/// Escapes `init` for use as the format string in a shell `printf '...\n'` call.
+///
+/// - Backslashes are doubled so printf does not interpret them as escape sequences.
+/// - Real newline characters are replaced with `\n` for printf to output as newlines.
+/// - Single quotes are escaped for the surrounding single-quoted shell string.
+/// - Percent signs are doubled so printf does not treat them as format specifiers.
+fn init_for_printf(init: &str) -> String {
+    init.replace('\\', "\\\\")
+        .replace('\n', "\\n")
+        .replace('\'', "'\\''")
+        .replace('%', "%%")
+}
+
 fn final_stage(
     agent: Option<&dyn Agent>,
     features: &[StagedFeature],
@@ -267,6 +287,7 @@ fn final_stage(
     skill_names: &[String],
     env_vars: &HashMap<String, String>,
     with_policy: bool,
+    image_mount_inits: &[String],
 ) -> String {
     let agent_section = agent
         .map(|a| format!("{}\n\n", a.install()))
@@ -295,13 +316,26 @@ fn final_stage(
     } else {
         ""
     };
+    // Build the shell snippet that appends each image-mount init to .bashrc and .zshrc.
+    // Each init line is emitted as a printf call so that $VAR references in the init
+    // are written literally (single-quoted) and expanded at container runtime.
+    let mount_init_snippet: String = image_mount_inits
+        .iter()
+        .filter(|s| !s.trim().is_empty())
+        .map(|init| {
+            let escaped = init_for_printf(init.trim());
+            // Regular (non-raw) string: \\\n → backslash + newline (Dockerfile continuation)
+            //                           \\n  → backslash-n two chars (printf newline escape)
+            format!(" && \\\n    printf '{escaped}\\n' >> /sandbox/.bashrc && \\\n    printf '{escaped}\\n' >> /sandbox/.zshrc")
+        })
+        .collect();
     format!(
         r#"# Final base image
 FROM system AS final
 
 {features_section}{policy_section}RUN printf 'export PS1="\\u@\\h:\\w\\$ "\n' \
         > /sandbox/.bashrc && \
-    printf '[ -f ~/.bashrc ] && . ~/.bashrc\n' > /sandbox/.profile && \
+    printf '[ -f ~/.bashrc ] && . ~/.bashrc\n' > /sandbox/.profile{mount_init_snippet} && \
     chown sandbox:sandbox /sandbox/.bashrc /sandbox/.profile && \
     chown -R sandbox:sandbox /sandbox
 
@@ -329,18 +363,34 @@ mod tests {
     ) -> Result<String, ContainerfileError> {
         generate(
             config,
-            agent,
-            features,
-            with_agent_settings,
-            skill_names,
-            &HashMap::new(),
-            with_policy,
-            false,
+            &ContainerfileOptions {
+                agent,
+                features,
+                with_agent_settings,
+                skill_names,
+                env_vars: &HashMap::new(),
+                with_policy,
+                with_ca_certs: false,
+                image_mount_inits: &[],
+            },
         )
     }
 
     fn build_cf_with_ca_certs(config: &Config) -> String {
-        generate(config, None, &[], false, &[], &HashMap::new(), false, true).unwrap()
+        generate(
+            config,
+            &ContainerfileOptions {
+                agent: None,
+                features: &[],
+                with_agent_settings: false,
+                skill_names: &[],
+                env_vars: &HashMap::new(),
+                with_policy: false,
+                with_ca_certs: true,
+                image_mount_inits: &[],
+            },
+        )
+        .unwrap()
     }
 
     fn ubuntu_config(tag: &str) -> Config {
@@ -1007,13 +1057,16 @@ mod tests {
         );
         let content = generate(
             &ubuntu_config("24.04"),
-            None,
-            &[],
-            false,
-            &[],
-            &vars,
-            false,
-            false,
+            &ContainerfileOptions {
+                agent: None,
+                features: &[],
+                with_agent_settings: false,
+                skill_names: &[],
+                env_vars: &vars,
+                with_policy: false,
+                with_ca_certs: false,
+                image_mount_inits: &[],
+            },
         )
         .unwrap();
         assert!(content.contains("ENV ANTHROPIC_BASE_URL=\"https://proxy.example.com\""));
@@ -1028,13 +1081,16 @@ mod tests {
         );
         let content = generate(
             &ubuntu_config("24.04"),
-            None,
-            &[],
-            false,
-            &[],
-            &vars,
-            false,
-            false,
+            &ContainerfileOptions {
+                agent: None,
+                features: &[],
+                with_agent_settings: false,
+                skill_names: &[],
+                env_vars: &vars,
+                with_policy: false,
+                with_ca_certs: false,
+                image_mount_inits: &[],
+            },
         )
         .unwrap();
         let user_pos = content.find("USER sandbox").unwrap();
@@ -1059,13 +1115,16 @@ mod tests {
         vars.insert("A_VAR".to_string(), "a".to_string());
         let content = generate(
             &ubuntu_config("24.04"),
-            None,
-            &[],
-            false,
-            &[],
-            &vars,
-            false,
-            false,
+            &ContainerfileOptions {
+                agent: None,
+                features: &[],
+                with_agent_settings: false,
+                skill_names: &[],
+                env_vars: &vars,
+                with_policy: false,
+                with_ca_certs: false,
+                image_mount_inits: &[],
+            },
         )
         .unwrap();
         let a_pos = content.find("ENV A_VAR=").unwrap();
@@ -1150,5 +1209,205 @@ mod tests {
             cert_pos > apt_pos,
             "CA cert COPY must appear after apt-get install"
         );
+    }
+
+    // image_mount_inits
+
+    #[test]
+    fn image_mount_init_appended_to_bashrc() {
+        let inits = vec!["export PATH=/sandbox/mnt/curl/usr/bin:$PATH".to_string()];
+        let content = generate(
+            &ubuntu_config("24.04"),
+            &ContainerfileOptions {
+                agent: None,
+                features: &[],
+                with_agent_settings: false,
+                skill_names: &[],
+                env_vars: &HashMap::new(),
+                with_policy: false,
+                with_ca_certs: false,
+                image_mount_inits: &inits,
+            },
+        )
+        .unwrap();
+        assert!(content.contains(
+            "printf 'export PATH=/sandbox/mnt/curl/usr/bin:$PATH\\n' >> /sandbox/.bashrc"
+        ));
+    }
+
+    #[test]
+    fn image_mount_init_appended_to_zshrc() {
+        let inits = vec!["export PATH=/sandbox/mnt/curl/usr/bin:$PATH".to_string()];
+        let content = generate(
+            &ubuntu_config("24.04"),
+            &ContainerfileOptions {
+                agent: None,
+                features: &[],
+                with_agent_settings: false,
+                skill_names: &[],
+                env_vars: &HashMap::new(),
+                with_policy: false,
+                with_ca_certs: false,
+                image_mount_inits: &inits,
+            },
+        )
+        .unwrap();
+        assert!(content.contains(
+            "printf 'export PATH=/sandbox/mnt/curl/usr/bin:$PATH\\n' >> /sandbox/.zshrc"
+        ));
+    }
+
+    #[test]
+    fn image_mount_init_appears_before_chown() {
+        let inits = vec!["export PATH=/sandbox/mnt/curl/usr/bin:$PATH".to_string()];
+        let content = generate(
+            &ubuntu_config("24.04"),
+            &ContainerfileOptions {
+                agent: None,
+                features: &[],
+                with_agent_settings: false,
+                skill_names: &[],
+                env_vars: &HashMap::new(),
+                with_policy: false,
+                with_ca_certs: false,
+                image_mount_inits: &inits,
+            },
+        )
+        .unwrap();
+        let init_pos = content
+            .find("printf 'export PATH=/sandbox/mnt/curl/usr/bin:$PATH\\n' >> /sandbox/.bashrc")
+            .unwrap();
+        let chown_pos = content
+            .find("chown sandbox:sandbox /sandbox/.bashrc")
+            .unwrap();
+        assert!(
+            init_pos < chown_pos,
+            "image-mount init printf must appear before chown"
+        );
+    }
+
+    #[test]
+    fn image_mount_init_appears_after_profile_creation() {
+        let inits = vec!["export PATH=/sandbox/mnt/curl/usr/bin:$PATH".to_string()];
+        let content = generate(
+            &ubuntu_config("24.04"),
+            &ContainerfileOptions {
+                agent: None,
+                features: &[],
+                with_agent_settings: false,
+                skill_names: &[],
+                env_vars: &HashMap::new(),
+                with_policy: false,
+                with_ca_certs: false,
+                image_mount_inits: &inits,
+            },
+        )
+        .unwrap();
+        let profile_pos = content.find("> /sandbox/.profile").unwrap();
+        let init_pos = content.find(">> /sandbox/.bashrc").unwrap();
+        assert!(
+            init_pos > profile_pos,
+            "image-mount init printf must appear after profile creation"
+        );
+    }
+
+    #[test]
+    fn no_image_mount_produces_no_zshrc_line() {
+        let content = build_cf(&ubuntu_config("24.04"), None, &[], false, &[], false).unwrap();
+        assert!(
+            !content.contains(".zshrc"),
+            "no .zshrc line expected when no --image-mount is given"
+        );
+    }
+
+    #[test]
+    fn multiple_image_mounts_each_produce_bashrc_and_zshrc_lines() {
+        let inits = vec![
+            "export PATH=/sandbox/mnt/curl/usr/bin:$PATH".to_string(),
+            "export PATH=/sandbox/mnt/jq/usr/bin:$PATH".to_string(),
+        ];
+        let content = generate(
+            &ubuntu_config("24.04"),
+            &ContainerfileOptions {
+                agent: None,
+                features: &[],
+                with_agent_settings: false,
+                skill_names: &[],
+                env_vars: &HashMap::new(),
+                with_policy: false,
+                with_ca_certs: false,
+                image_mount_inits: &inits,
+            },
+        )
+        .unwrap();
+        assert!(content.contains("export PATH=/sandbox/mnt/curl/usr/bin:$PATH"));
+        assert!(content.contains("export PATH=/sandbox/mnt/jq/usr/bin:$PATH"));
+        assert_eq!(
+            content
+                .matches("export PATH=/sandbox/mnt/curl/usr/bin:$PATH")
+                .count(),
+            2,
+            "curl init must appear twice (bashrc + zshrc)"
+        );
+        assert_eq!(
+            content
+                .matches("export PATH=/sandbox/mnt/jq/usr/bin:$PATH")
+                .count(),
+            2,
+            "jq init must appear twice (bashrc + zshrc)"
+        );
+    }
+
+    #[test]
+    fn image_mount_init_single_quote_escaped() {
+        let inits = vec!["export X='hello'".to_string()];
+        let content = generate(
+            &ubuntu_config("24.04"),
+            &ContainerfileOptions {
+                agent: None,
+                features: &[],
+                with_agent_settings: false,
+                skill_names: &[],
+                env_vars: &HashMap::new(),
+                with_policy: false,
+                with_ca_certs: false,
+                image_mount_inits: &inits,
+            },
+        )
+        .unwrap();
+        assert!(
+            content.contains("export X='\\''hello'\\''"),
+            "single quotes in init must be escaped for shell"
+        );
+    }
+
+    #[test]
+    fn image_mount_init_percent_escaped() {
+        let inits = vec!["export DATE_FMT=%Y-%m-%d".to_string()];
+        let content = generate(
+            &ubuntu_config("24.04"),
+            &ContainerfileOptions {
+                agent: None,
+                features: &[],
+                with_agent_settings: false,
+                skill_names: &[],
+                env_vars: &HashMap::new(),
+                with_policy: false,
+                with_ca_certs: false,
+                image_mount_inits: &inits,
+            },
+        )
+        .unwrap();
+        // % must be doubled so printf does not treat it as a format specifier
+        assert!(
+            content.contains("export DATE_FMT=%%Y-%%m-%%d"),
+            "percent signs in init must be doubled for printf"
+        );
+    }
+
+    #[test]
+    fn empty_image_mount_inits_produces_no_zshrc() {
+        let content = build_cf(&ubuntu_config("24.04"), None, &[], false, &[], false).unwrap();
+        assert!(!content.contains(".zshrc"));
     }
 }
