@@ -19,7 +19,7 @@ members = [".", "crates/container-image-builder", "crates/vm-image-builder"]
 
 [package]
 name = "openshell-image-builder"
-version = "0.12.0-next"
+version = "0.13.0-next"
 edition = "2024"
 
 [features]
