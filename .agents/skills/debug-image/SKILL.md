@@ -1,6 +1,6 @@
 ---
 name: debug-image
-description: Inspect a built openshell test image interactively — verify binaries, config files, policy, env vars, and file ownership after a failing integration test
+description: Inspect a built openshell test image interactively — verify binaries, config files, policy, env vars after a failing integration test
 argument-hint: "<image-tag>"
 ---
 
@@ -11,8 +11,6 @@ Manually inspect a built test image to diagnose a failing integration test.
 ## Description
 
 Integration tests build container images with podman and run commands inside them. When a test fails, the image is still on disk (unless you have already cleaned up) and can be inspected directly. This skill shows how to identify the correct image, replicate what the test does, and look inside the container to find what is wrong.
-
-The images have ENTRYPOINT `/bin/bash` and run as the `sandbox` user by default.
 
 ## Step 1 — identify the image tag
 
@@ -50,18 +48,11 @@ fn run_in_image(image: &str, cmd: &str) -> Output {
 }
 ```
 
-Replicate it exactly from the shell:
+Use an explicit Bash entrypoint when running a shell command manually:
 
 ```sh
-podman run --rm openshell-test-ubuntu-claude:integration -c "which claude"
-podman run --rm openshell-test-ubuntu-claude:integration -c "cat /etc/openshell/policy.yaml"
-podman run --rm openshell-test-ubuntu-claude:integration -c "stat -c '%U' /sandbox/.claude.json"
-```
-
-Commands run as the `sandbox` user. For commands that need root (e.g. checking `/etc` ownership):
-
-```sh
-podman run --rm --user root openshell-test-ubuntu-claude:integration -c "ls -la /etc/openshell/"
+podman run --rm --entrypoint /bin/bash openshell-test-ubuntu-claude:integration -c "which claude"
+podman run --rm --entrypoint /bin/bash openshell-test-ubuntu-claude:integration -c "cat /etc/openshell/policy.yaml"
 ```
 
 ## Step 4 — open an interactive shell
@@ -69,11 +60,8 @@ podman run --rm --user root openshell-test-ubuntu-claude:integration -c "ls -la 
 Drop into a shell for free-form exploration:
 
 ```sh
-# as sandbox (default)
-podman run -it --rm openshell-test-ubuntu-claude:integration
+podman run -it --rm --entrypoint /bin/bash openshell-test-ubuntu-claude:integration
 
-# as root (for privileged inspection)
-podman run -it --rm --user root openshell-test-ubuntu-claude:integration
 ```
 
 ## Step 5 — rebuild an image manually
@@ -120,8 +108,8 @@ RUST_LOG=debug cargo run -- --agent claude --inference anthropic openshell-test-
 ### `claude_in_path` / `opencode_in_path`
 
 ```sh
-podman run --rm <image> -c "which claude"
-podman run --rm <image> -c "echo $PATH"
+podman run --rm --entrypoint /bin/bash <image> -c "which claude"
+podman run --rm --entrypoint /bin/bash <image> -c "echo $PATH"
 ```
 
 The binary is installed under `/sandbox/` by the `install()` method and added to `PATH` via a Containerfile `ENV` instruction. If `which` fails, either the download in `install()` failed during the build or the `ENV PATH=` line is missing/wrong.
@@ -129,14 +117,14 @@ The binary is installed under `/sandbox/` by the `install()` method and added to
 ### `policy_yaml_exists`
 
 ```sh
-podman run --rm <image> -c "test -f /etc/openshell/policy.yaml && echo found || echo missing"
-podman run --rm <image> -c "cat /etc/openshell/policy.yaml"
+podman run --rm --entrypoint /bin/bash <image> -c "test -f /etc/openshell/policy.yaml && echo found || echo missing"
+podman run --rm --entrypoint /bin/bash <image> -c "cat /etc/openshell/policy.yaml"
 ```
 
 ### `policy_has_claude_rules` / `policy_has_anthropic_rules` / etc.
 
 ```sh
-podman run --rm <image> -c "cat /etc/openshell/policy.yaml"
+podman run --rm --entrypoint /bin/bash <image> -c "cat /etc/openshell/policy.yaml"
 ```
 
 Check for the expected `name:` key. The policy check helpers look for:
@@ -150,31 +138,24 @@ Check for the expected `name:` key. The policy check helpers look for:
 
 ```sh
 # Claude — .claude.json skips onboarding
-podman run --rm <image> -c "cat /sandbox/.claude.json"
+podman run --rm --entrypoint /bin/bash <image> -c "cat /sandbox/.claude.json"
 
 # Opencode — config.json selects inference provider
-podman run --rm <image> -c "cat /sandbox/.config/opencode/config.json"
-```
-
-### File ownership
-
-```sh
-podman run --rm <image> -c "stat -c '%U' /sandbox/.claude.json"
-# expected output: sandbox
+podman run --rm --entrypoint /bin/bash <image> -c "cat /sandbox/.config/opencode/config.json"
 ```
 
 ### Environment variables baked into the image
 
 ```sh
-podman run --rm <image> -c "env | grep ANTHROPIC"
-podman run --rm <image> -c "printenv ANTHROPIC_BASE_URL"
+podman run --rm --entrypoint /bin/bash <image> -c "env | grep ANTHROPIC"
+podman run --rm --entrypoint /bin/bash <image> -c "printenv ANTHROPIC_BASE_URL"
 ```
 
 ### Skills directory
 
 ```sh
-podman run --rm <image> -c "ls -la /sandbox/.claude/skills/"
-podman run --rm <image> -c "ls -la /sandbox/.opencode/skills/"
+podman run --rm --entrypoint /bin/bash <image> -c "ls -la /sandbox/.claude/skills/"
+podman run --rm --entrypoint /bin/bash <image> -c "ls -la /sandbox/.opencode/skills/"
 ```
 
 ## Step 7 — inspect the Containerfile

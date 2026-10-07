@@ -18,23 +18,16 @@ image = "myimage"
 tag   = "latest"
 ```
 
-The name is a plain string — no enum, no CLI flag change. Adding a new base image only touches two files: `src/containerfile.rs` and `tests/integration_test.rs`.
+The name is a plain string — no enum, no CLI flag change. Adding a new base image typically updates `src/containerfile.rs`, `tests/integration_test.rs`, and `README.md`; unit tests live beside the Containerfile generator.
 
 ## Step 1 — decide the package manager
 
 The codebase already has two helpers in `src/containerfile.rs`:
 
-- **`ubuntu_system_stage(tag)`** — APT, `docker.io/library/ubuntu`.
-- **`dnf_system_stage(base_image, tag, packages)`** — DNF, used by fedora, ubi, and hummingbird.
+- **`ubuntu_system_stage(tag, with_ca_certs)`** — APT, `docker.io/library/ubuntu`.
+- **`dnf_system_stage(base_image, tag, packages, with_ca_certs)`** — DNF, used by fedora, ubi, and hummingbird.
 
-For a new image, reuse the helper whose package manager matches. If the new image uses a third package manager (e.g., apk for Alpine), write a new `fn alpine_system_stage(tag: &str) -> String` following the same pattern as the existing two: `FROM <registry>:{tag} AS system`, install packages, create `supervisor` and `sandbox` users.
-
-Required users and groups — every base image must create them the same way:
-
-```sh
-groupadd -r supervisor && useradd -r -g supervisor -s /usr/sbin/nologin supervisor
-groupadd -r sandbox   && useradd -r -g sandbox -d /sandbox -s /bin/bash sandbox
-```
+For a new image, reuse the helper whose package manager matches. If the new image uses a third package manager (e.g., apk for Alpine), write a new system-stage helper following the same pattern: `FROM <registry>:{tag} AS system`, install packages, and add the optional CA bundle instructions.
 
 Minimum packages needed regardless of package manager: `ca-certificates`, `curl`, `openssh-server` (or equivalent sshd), `tar`, `which`, `procps` (or equivalent).
 
@@ -77,6 +70,7 @@ Inside `generate()`, add a new arm to the `match config.base_image.image.as_str(
         "which",
         // add further packages the image needs
     ],
+    with_ca_certs,
 ),
 ```
 
@@ -103,58 +97,37 @@ Then add these tests — every existing base image has all of them, keep the set
 ```rust
 #[test]
 fn myimage_generates_successfully() {
-    assert!(build_cf(&myimage_config(), None, &[], false, &[]).is_ok());
+    assert!(build_cf(&myimage_config(), None, &[], false, &[], false).is_ok());
 }
 
 #[test]
 fn myimage_containerfile_contains_tag() {
-    let content = build_cf(&myimage_config(), None, &[], false, &[]).unwrap();
+    let content = build_cf(&myimage_config(), None, &[], false, &[], false).unwrap();
     assert!(content.contains("FROM registry.example.com/myimage:latest AS system"));
 }
 
 #[test]
 fn myimage_containerfile_tag_is_substituted() {
-    let content = build_cf(&myimage_config(), None, &[], false, &[]).unwrap();
+    let content = build_cf(&myimage_config(), None, &[], false, &[], false).unwrap();
     assert!(!content.contains("{tag}"));
 }
 
 #[test]
 fn myimage_with_agent_includes_install() {
-    let content = build_cf(&myimage_config(), Some(&MockAgent), &[], false, &[]).unwrap();
+    let content = build_cf(&myimage_config(), Some(&MockAgent), &[], false, &[], false).unwrap();
     assert!(content.contains("RUN echo mock-agent"));
 }
 
 #[test]
-fn myimage_agent_install_runs_as_sandbox_user() {
-    let content = build_cf(&myimage_config(), Some(&MockAgent), &[], false, &[]).unwrap();
-    let user_pos    = content.find("USER sandbox").unwrap();
-    let install_pos = content.find("RUN echo mock-agent").unwrap();
-    assert!(install_pos > user_pos, "agent install must appear after USER sandbox");
-}
-
-#[test]
 fn myimage_without_agent_omits_install() {
-    let content = build_cf(&myimage_config(), None, &[], false, &[]).unwrap();
+    let content = build_cf(&myimage_config(), None, &[], false, &[], false).unwrap();
     assert!(!content.contains("RUN echo mock-agent"));
 }
 
 #[test]
 fn myimage_copies_policy_yaml() {
-    let content = build_cf(&myimage_config(), None, &[], false, &[]).unwrap();
+    let content = build_cf(&myimage_config(), None, &[], false, &[], true).unwrap();
     assert!(content.contains("COPY policy.yaml /etc/openshell/policy.yaml"));
-}
-```
-
-Also extend the `home_env_set_to_sandbox` test to include the new config, so it keeps covering every base image:
-
-```rust
-fn home_env_set_to_sandbox() {
-    for content in [
-        ...,
-        build_cf(&myimage_config(), None, &[], false, &[]).unwrap(),
-    ] {
-        assert!(content.contains("ENV HOME=/sandbox"));
-    }
 }
 ```
 
@@ -188,6 +161,7 @@ Add one `OnceLock` and one accessor per agent × inference combination. Follow t
 | claude + vertexai     | `myimage_claude_vertexai_image`| `["--agent", "claude", "--inference", "vertexai"]` |
 | opencode + vertexai   | `myimage_opencode_vertexai_image`| `["--agent", "opencode", "--inference", "vertexai"]` |
 | opencode + ollama     | `myimage_opencode_ollama_image`| `["--agent", "opencode", "--inference", "ollama"]` |
+| opencode + openai     | `myimage_opencode_openai_image`| `["--agent", "opencode", "--inference", "openai"]` |
 
 Example for the no-agent variant (pass the `--config` flag when a config dir is needed):
 
@@ -210,17 +184,18 @@ fn myimage_image() -> &'static str {
 Add one call per combination in the matrix block (around line 678):
 
 ```rust
-image_tests!(myimage,                  myimage_image,                  has_claude: false, has_opencode: false, has_anthropic: false, has_vertexai: false, has_ollama: false);
-image_tests!(myimage_claude,           myimage_claude_image,           has_claude: true,  has_opencode: false, has_anthropic: true,  has_vertexai: false, has_ollama: false);
-image_tests!(myimage_opencode,         myimage_opencode_image,         has_claude: false, has_opencode: true,  has_anthropic: true,  has_vertexai: false, has_ollama: false);
-image_tests!(myimage_claude_vertexai,  myimage_claude_vertexai_image,  has_claude: true,  has_opencode: false, has_anthropic: false, has_vertexai: true,  has_ollama: false);
-image_tests!(myimage_opencode_vertexai,myimage_opencode_vertexai_image,has_claude: false, has_opencode: true,  has_anthropic: false, has_vertexai: true,  has_ollama: false);
-image_tests!(myimage_opencode_ollama,  myimage_opencode_ollama_image,  has_claude: false, has_opencode: true,  has_anthropic: false, has_vertexai: false, has_ollama: true);
+image_tests!(myimage,                  myimage_image,                  has_claude: false, has_opencode: false, has_anthropic: false, has_vertexai: false, has_ollama: false, has_openai: false);
+image_tests!(myimage_claude,           myimage_claude_image,           has_claude: true,  has_opencode: false, has_anthropic: true,  has_vertexai: false, has_ollama: false, has_openai: false);
+image_tests!(myimage_opencode,         myimage_opencode_image,         has_claude: false, has_opencode: true,  has_anthropic: true,  has_vertexai: false, has_ollama: false, has_openai: false);
+image_tests!(myimage_claude_vertexai,  myimage_claude_vertexai_image,  has_claude: true,  has_opencode: false, has_anthropic: false, has_vertexai: true,  has_ollama: false, has_openai: false);
+image_tests!(myimage_opencode_vertexai,myimage_opencode_vertexai_image,has_claude: false, has_opencode: true,  has_anthropic: false, has_vertexai: true,  has_ollama: false, has_openai: false);
+image_tests!(myimage_opencode_ollama,  myimage_opencode_ollama_image,  has_claude: false, has_opencode: true,  has_anthropic: false, has_vertexai: false, has_ollama: true,  has_openai: false);
+image_tests!(myimage_opencode_openai,  myimage_opencode_openai_image,  has_claude: false, has_opencode: true,  has_anthropic: false, has_vertexai: false, has_ollama: false, has_openai: true);
 ```
 
 ### Cleanup
 
-Add all six tags to the `cleanup_images` array in the `#[ctor::dtor]` at the bottom of the file:
+Add a tag to the `cleanup_images` array in the `#[ctor::dtor]` at the bottom of the file for every image accessor you add:
 
 ```rust
 "openshell-test-myimage:integration",
@@ -229,6 +204,7 @@ Add all six tags to the `cleanup_images` array in the `#[ctor::dtor]` at the bot
 "openshell-test-myimage-claude-vertexai:integration",
 "openshell-test-myimage-opencode-vertexai:integration",
 "openshell-test-myimage-opencode-ollama:integration",
+"openshell-test-myimage-opencode-openai:integration",
 ```
 
 ## Checklist
@@ -239,11 +215,10 @@ Add all six tags to the `cleanup_images` array in the `#[ctor::dtor]` at the bot
 - [ ] Package manager identified; new stage helper written if needed
 - [ ] Match arm added in `generate()` before the catch-all `image =>` arm
 - [ ] `myimage_config()` helper added in `src/containerfile.rs` tests
-- [ ] All seven unit tests added (generates, tag present, tag substituted, with/without agent, agent order, policy yaml)
-- [ ] `home_env_set_to_sandbox` extended with the new config
+- [ ] Unit tests cover generation, tag substitution, agent install, policy copy, CA behavior
 - [ ] `myimage_config_dir()` helper added to integration tests if the image uses a non-default tag
-- [ ] Six `OnceLock` statics and six accessor functions added
-- [ ] Six `image_tests!` calls added in the matrix block
-- [ ] Six tags added to `cleanup_images`
+- [ ] One `OnceLock` static and accessor added per tested image variant
+- [ ] `image_tests!` calls added for the supported combinations, including the `has_openai` argument
+- [ ] Every added tag listed in `cleanup_images`
 - [ ] `/check` passes (fmt + clippy + unit tests)
 - [ ] `/copyright-headers` run if a new `.rs` file was created

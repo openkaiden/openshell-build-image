@@ -131,9 +131,7 @@ fn skills_section(agent: Option<&dyn Agent>, skill_names: &[String]) -> String {
     };
     let mut out = String::new();
     for name in skill_names {
-        out.push_str(&format!(
-            "COPY --chown=sandbox:sandbox skills/{name}/ {skills_dir}/{name}/\n"
-        ));
+        out.push_str(&format!("COPY skills/{name}/ {skills_dir}/{name}/\n"));
     }
     out.push('\n');
     out
@@ -152,8 +150,9 @@ fn features_section(features: &[StagedFeature]) -> String {
     }
 
     let mut out = String::new();
-    out.push_str("ENV _REMOTE_USER=\"sandbox\"\n");
+    out.push_str("ENV _REMOTE_USER=\"root\"\n");
     out.push_str("ENV _REMOTE_USER_HOME=\"/sandbox\"\n");
+    out.push_str("RUN mkdir -p \"$_REMOTE_USER_HOME\"\n");
 
     for feature in features {
         out.push('\n');
@@ -208,10 +207,6 @@ fn ubuntu_system_stage(tag: &str, with_ca_certs: bool) -> String {
         r#"# System base
 FROM docker.io/library/ubuntu:{tag} AS system
 
-ENV DEBIAN_FRONTEND=noninteractive
-
-WORKDIR /sandbox
-
 # Core system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
@@ -227,9 +222,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         procps \
         traceroute \
     && rm -rf /var/lib/apt/lists/*
+{ca_cert_section}
 
-{ca_cert_section}RUN groupadd -r supervisor && useradd -r -g supervisor -s /usr/sbin/nologin supervisor && \
-    groupadd -r sandbox && useradd -r -g sandbox -d /sandbox -s /bin/bash sandbox
 "#
     )
 }
@@ -248,7 +242,6 @@ fn dnf_system_stage(base_image: &str, tag: &str, packages: &[&str], with_ca_cert
     format!(
         r#"# System base
 FROM {base_image}:{tag} AS system
-WORKDIR /sandbox
 
 # Core system dependencies
 USER 0
@@ -256,8 +249,6 @@ USER 0
 {pkg_lines}
     && dnf clean all
 
-RUN groupadd -r supervisor && useradd -r -g supervisor -s /usr/sbin/nologin supervisor && \
-    groupadd -r sandbox && useradd -r -g sandbox -d /sandbox -s /bin/bash sandbox
 "#
     )
 }
@@ -272,7 +263,8 @@ fn final_stage(
     copy_containerfile: bool,
 ) -> String {
     let containerfile_section = if copy_containerfile {
-        "COPY --chown=sandbox:sandbox build-containerfile ${HOME}/Containerfile\n\n"
+        "COPY build-containerfile /tmp/build-containerfile\n\
+         RUN cp /tmp/build-containerfile \"$HOME/Containerfile\" && rm /tmp/build-containerfile\n\n"
     } else {
         ""
     };
@@ -280,7 +272,7 @@ fn final_stage(
         .map(|a| format!("{}\n\n", a.install()))
         .unwrap_or_default();
     let agent_settings_section = if with_agent_settings {
-        "COPY --chown=sandbox:sandbox agent-settings/ /sandbox/\n\n"
+        "COPY agent-settings/ /sandbox/\n\n"
     } else {
         ""
     };
@@ -307,16 +299,7 @@ fn final_stage(
         r#"# Final base image
 FROM system AS final
 
-{features_section}{policy_section}RUN printf 'export PS1="\\u@\\h:\\w\\$ "\n' \
-        > /sandbox/.bashrc && \
-    printf '[ -f ~/.bashrc ] && . ~/.bashrc\n' > /sandbox/.profile && \
-    chown sandbox:sandbox /sandbox/.bashrc /sandbox/.profile && \
-    chown -R sandbox:sandbox /sandbox
-
-ENV HOME=/sandbox
-USER sandbox
-
-{env_vars_section}{agent_settings_section}{skills_section}{agent_section}{containerfile_section}ENTRYPOINT ["/bin/bash"]
+{features_section}{policy_section}{env_vars_section}{agent_settings_section}{skills_section}{agent_section}{containerfile_section}
 "#
     )
 }
@@ -469,25 +452,6 @@ mod tests {
     }
 
     #[test]
-    fn ubuntu_agent_install_runs_as_sandbox_user() {
-        let content = build_cf(
-            &ubuntu_config("noble-20251013"),
-            Some(&MockAgent),
-            &[],
-            false,
-            &[],
-            false,
-        )
-        .unwrap();
-        let user_pos = content.find("USER sandbox").unwrap();
-        let install_pos = content.find("RUN echo mock-agent").unwrap();
-        assert!(
-            install_pos > user_pos,
-            "agent install must appear after USER sandbox"
-        );
-    }
-
-    #[test]
     fn ubuntu_without_agent_omits_install() {
         let content = build_cf(
             &ubuntu_config("noble-20251013"),
@@ -529,18 +493,6 @@ mod tests {
     }
 
     #[test]
-    fn fedora_agent_install_runs_as_sandbox_user() {
-        let content = build_cf(&fedora_config(), Some(&MockAgent), &[], false, &[], false).unwrap();
-
-        let user_pos = content.find("USER sandbox").unwrap();
-        let install_pos = content.find("RUN echo mock-agent").unwrap();
-        assert!(
-            install_pos > user_pos,
-            "agent install must appear after USER sandbox"
-        );
-    }
-
-    #[test]
     fn fedora_without_agent_omits_install() {
         let content = build_cf(&fedora_config(), None, &[], false, &[], false).unwrap();
 
@@ -571,18 +523,6 @@ mod tests {
         let content = build_cf(&ubi_config(), Some(&MockAgent), &[], false, &[], false).unwrap();
 
         assert!(content.contains("RUN echo mock-agent"));
-    }
-
-    #[test]
-    fn ubi_agent_install_runs_as_sandbox_user() {
-        let content = build_cf(&ubi_config(), Some(&MockAgent), &[], false, &[], false).unwrap();
-
-        let user_pos = content.find("USER sandbox").unwrap();
-        let install_pos = content.find("RUN echo mock-agent").unwrap();
-        assert!(
-            install_pos > user_pos,
-            "agent install must appear after USER sandbox"
-        );
     }
 
     #[test]
@@ -637,26 +577,6 @@ mod tests {
     }
 
     #[test]
-    fn hummingbird_agent_install_runs_as_sandbox_user() {
-        let content = build_cf(
-            &hummingbird_config(),
-            Some(&MockAgent),
-            &[],
-            false,
-            &[],
-            false,
-        )
-        .unwrap();
-
-        let user_pos = content.find("USER sandbox").unwrap();
-        let install_pos = content.find("RUN echo mock-agent").unwrap();
-        assert!(
-            install_pos > user_pos,
-            "agent install must appear after USER sandbox"
-        );
-    }
-
-    #[test]
     fn hummingbird_without_agent_omits_install() {
         let content = build_cf(&hummingbird_config(), None, &[], false, &[], false).unwrap();
 
@@ -677,18 +597,6 @@ mod tests {
             content.contains("iproute"),
             "hummingbird image must install iproute for network namespace support"
         );
-    }
-
-    #[test]
-    fn home_env_set_to_sandbox() {
-        for content in [
-            build_cf(&ubuntu_config("24.04"), None, &[], false, &[], false).unwrap(),
-            build_cf(&fedora_config(), None, &[], false, &[], false).unwrap(),
-            build_cf(&ubi_config(), None, &[], false, &[], false).unwrap(),
-            build_cf(&hummingbird_config(), None, &[], false, &[], false).unwrap(),
-        ] {
-            assert!(content.contains("ENV HOME=/sandbox"));
-        }
     }
 
     #[test]
@@ -717,21 +625,6 @@ mod tests {
             }
         );
     }
-
-    #[test]
-    fn feature_section_appears_before_profile_setup() {
-        let feature = mock_feature("./tools/my-feature", "feature-0");
-        let content =
-            build_cf(&ubuntu_config("24.04"), None, &[feature], false, &[], false).unwrap();
-
-        let feature_pos = content.find("# Feature:").unwrap();
-        let profile_pos = content.find("printf 'export PS1").unwrap();
-        assert!(
-            feature_pos < profile_pos,
-            "feature block must appear before profile setup"
-        );
-    }
-
     #[test]
     fn feature_copy_instruction_present() {
         let feature = mock_feature("./tools/my-feature", "feature-0");
@@ -740,16 +633,6 @@ mod tests {
 
         assert!(content.contains("COPY features/feature-0/"));
         assert!(content.contains("/tmp/feature-install/feature-0/install.sh"));
-    }
-
-    #[test]
-    fn feature_remote_user_env_vars_set() {
-        let feature = mock_feature("./tools/my-feature", "feature-0");
-        let content =
-            build_cf(&ubuntu_config("24.04"), None, &[feature], false, &[], false).unwrap();
-
-        assert!(content.contains("_REMOTE_USER=\"sandbox\""));
-        assert!(content.contains("_REMOTE_USER_HOME=\"/sandbox\""));
     }
 
     #[test]
@@ -774,20 +657,6 @@ mod tests {
             build_cf(&ubuntu_config("24.04"), None, &[feature], false, &[], false).unwrap();
 
         assert!(content.contains("ENV CARGO_HOME=\"/home/sandbox/.cargo\""));
-    }
-
-    #[test]
-    fn feature_block_before_user_sandbox() {
-        let feature = mock_feature("./tools/my-feature", "feature-0");
-        let content =
-            build_cf(&ubuntu_config("24.04"), None, &[feature], false, &[], false).unwrap();
-
-        let feature_pos = content.find("# Feature:").unwrap();
-        let user_sandbox_pos = content.find("USER sandbox").unwrap();
-        assert!(
-            feature_pos < user_sandbox_pos,
-            "feature must be installed before USER sandbox"
-        );
     }
 
     #[test]
@@ -827,23 +696,10 @@ mod tests {
     }
 
     #[test]
-    fn policy_copy_appears_before_user_sandbox() {
-        let content = build_cf(&ubuntu_config("24.04"), None, &[], false, &[], true).unwrap();
-        let copy_pos = content
-            .find("COPY policy.yaml /etc/openshell/policy.yaml")
-            .unwrap();
-        let user_pos = content.find("USER sandbox").unwrap();
-        assert!(
-            copy_pos < user_pos,
-            "policy.yaml COPY must appear before USER sandbox"
-        );
-    }
-
-    #[test]
     fn ubuntu_with_agent_settings_includes_copy() {
         let content = build_cf(&ubuntu_config("24.04"), None, &[], true, &[], false).unwrap();
 
-        assert!(content.contains("COPY --chown=sandbox:sandbox agent-settings/ /sandbox/"));
+        assert!(content.contains("COPY agent-settings/ /sandbox/"));
     }
 
     #[test]
@@ -857,28 +713,7 @@ mod tests {
     fn fedora_with_agent_settings_includes_copy() {
         let content = build_cf(&fedora_config(), None, &[], true, &[], false).unwrap();
 
-        assert!(content.contains("COPY --chown=sandbox:sandbox agent-settings/ /sandbox/"));
-    }
-
-    #[test]
-    fn agent_settings_copy_uses_chown_sandbox() {
-        let content = build_cf(&ubuntu_config("24.04"), None, &[], true, &[], false).unwrap();
-
-        assert!(content.contains("--chown=sandbox:sandbox"));
-    }
-
-    #[test]
-    fn agent_settings_copy_appears_after_user_sandbox() {
-        let content = build_cf(&ubuntu_config("24.04"), None, &[], true, &[], false).unwrap();
-
-        let user_pos = content.find("USER sandbox").unwrap();
-        let copy_pos = content
-            .find("COPY --chown=sandbox:sandbox agent-settings/")
-            .unwrap();
-        assert!(
-            copy_pos > user_pos,
-            "agent-settings COPY must appear after USER sandbox"
-        );
+        assert!(content.contains("COPY agent-settings/ /sandbox/"));
     }
 
     #[test]
@@ -893,9 +728,7 @@ mod tests {
         )
         .unwrap();
 
-        let copy_pos = content
-            .find("COPY --chown=sandbox:sandbox agent-settings/")
-            .unwrap();
+        let copy_pos = content.find("COPY agent-settings/").unwrap();
         let install_pos = content.find("RUN echo mock-agent").unwrap();
         assert!(
             copy_pos < install_pos,
@@ -915,7 +748,7 @@ mod tests {
             false,
         )
         .unwrap();
-        assert!(content.contains("COPY --chown=sandbox:sandbox skills/my-skill/"));
+        assert!(content.contains("COPY skills/my-skill/"));
     }
 
     #[test]
@@ -957,28 +790,6 @@ mod tests {
     }
 
     #[test]
-    fn skills_copy_appears_after_user_sandbox() {
-        let skills = vec!["my-skill".to_string()];
-        let content = build_cf(
-            &ubuntu_config("24.04"),
-            Some(&MockAgent),
-            &[],
-            false,
-            &skills,
-            false,
-        )
-        .unwrap();
-        let user_pos = content.find("USER sandbox").unwrap();
-        let skills_pos = content
-            .find("COPY --chown=sandbox:sandbox skills/my-skill/")
-            .unwrap();
-        assert!(
-            skills_pos > user_pos,
-            "skills COPY must appear after USER sandbox"
-        );
-    }
-
-    #[test]
     fn skills_copy_appears_before_agent_install() {
         let skills = vec!["my-skill".to_string()];
         let content = build_cf(
@@ -990,9 +801,7 @@ mod tests {
             false,
         )
         .unwrap();
-        let skills_pos = content
-            .find("COPY --chown=sandbox:sandbox skills/my-skill/")
-            .unwrap();
+        let skills_pos = content.find("COPY skills/my-skill/").unwrap();
         let install_pos = content.find("RUN echo mock-agent").unwrap();
         assert!(
             skills_pos < install_pos,
@@ -1012,8 +821,8 @@ mod tests {
             false,
         )
         .unwrap();
-        assert!(content.contains("COPY --chown=sandbox:sandbox skills/skill-a/"));
-        assert!(content.contains("COPY --chown=sandbox:sandbox skills/skill-b/"));
+        assert!(content.contains("COPY skills/skill-a/"));
+        assert!(content.contains("COPY skills/skill-b/"));
     }
 
     // env_vars
@@ -1041,33 +850,7 @@ mod tests {
     }
 
     #[test]
-    fn env_vars_appear_after_user_sandbox() {
-        let mut vars = HashMap::new();
-        vars.insert(
-            "ANTHROPIC_BASE_URL".to_string(),
-            "https://proxy.example.com".to_string(),
-        );
-        let content = generate(
-            &ubuntu_config("24.04"),
-            None,
-            &[],
-            false,
-            &[],
-            &vars,
-            false,
-            false,
-            false,
-        )
-        .unwrap();
-        let user_pos = content.find("USER sandbox").unwrap();
-        let env_pos = content.find("ENV ANTHROPIC_BASE_URL=").unwrap();
-        assert!(
-            env_pos > user_pos,
-            "agent env vars must appear after USER sandbox"
-        );
-    }
 
-    #[test]
     fn empty_env_vars_produces_no_extra_env_instruction() {
         let content = build_cf(&ubuntu_config("24.04"), None, &[], false, &[], false).unwrap();
 
@@ -1116,9 +899,9 @@ mod tests {
                 true,
             )
             .unwrap();
-            assert!(content.contains(
-                "COPY --chown=sandbox:sandbox build-containerfile ${HOME}/Containerfile"
-            ));
+            assert!(content.contains("COPY build-containerfile /tmp/build-containerfile"));
+            assert!(content.contains("RUN cp /tmp/build-containerfile \"$HOME/Containerfile\""));
+            assert!(!content.contains("--chown=sandbox"));
             let without_copy = build_cf(&config, None, &[], false, &[], false).unwrap();
             assert!(!without_copy.contains("build-containerfile"));
         }

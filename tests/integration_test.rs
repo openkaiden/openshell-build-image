@@ -69,9 +69,11 @@ fi
                     std::fs::read(&staged).unwrap(),
                     std::fs::read(&used).unwrap()
                 );
-                assert!(std::fs::read_to_string(used).unwrap().contains(
-                    "COPY --chown=sandbox:sandbox build-containerfile ${HOME}/Containerfile"
-                ));
+                assert!(
+                    std::fs::read_to_string(used)
+                        .unwrap()
+                        .contains("COPY build-containerfile /tmp/build-containerfile")
+                );
             }
         }
     }
@@ -98,21 +100,17 @@ mod copy_containerfile {
         assert!(output.status.success(), "{:?}", output);
         let content = String::from_utf8_lossy(&output.stdout);
         assert!(content.contains("FROM docker.io/library/ubuntu:24.04 AS system"));
-        assert!(
-            content
-                .contains("COPY --chown=sandbox:sandbox build-containerfile ${HOME}/Containerfile")
-        );
+        assert!(content.contains("COPY build-containerfile /tmp/build-containerfile"));
     }
 
     #[test]
     #[ignore]
-    fn containerfile_is_owned_by_sandbox() {
-        let output = run_in_image(image(), "stat -c '%U:%G' \"$HOME/Containerfile\"");
-        assert!(output.status.success(), "{:?}", output);
-        assert_eq!(
-            String::from_utf8_lossy(&output.stdout).trim(),
-            "sandbox:sandbox"
+    fn containerfile_is_owned_by_image_user() {
+        let output = run_in_image(
+            image(),
+            "test \"$(stat -c '%u:%g' \"$HOME/Containerfile\")\" = \"$(id -u):$(id -g)\"",
         );
+        assert!(output.status.success(), "{:?}", output);
     }
 
     #[test]
@@ -171,7 +169,7 @@ fn build_image(tag: &str, extra_args: &[&str]) -> String {
 
 fn run_in_image(image: &str, cmd: &str) -> Output {
     Command::new("podman")
-        .args(["run", "--rm", image, "-c", cmd])
+        .args(["run", "--rm", "--entrypoint", "/bin/bash", image, "-c", cmd])
         .output()
         .expect("podman run should execute")
 }
@@ -658,51 +656,11 @@ fn hummingbird_opencode_vertexai_image() -> &'static str {
 // Shared assertion helpers
 // ---------------------------------------------------------------------------
 
-fn check_users_and_groups(image: &str) {
-    for user in ["sandbox", "supervisor"] {
-        let out = run_in_image(image, &format!("id {user}"));
-        assert!(out.status.success(), "{user} user not found in image");
-    }
-
-    for group in ["sandbox", "supervisor"] {
-        let out = run_in_image(image, &format!("getent group {group}"));
-        assert!(out.status.success(), "{group} group not found in image");
-    }
-
-    let out = run_in_image(image, "whoami");
-    assert_eq!(
-        String::from_utf8_lossy(&out.stdout).trim(),
-        "sandbox",
-        "default image user is not sandbox"
-    );
-
-    let out = run_in_image(image, "echo $HOME");
-    assert_eq!(
-        String::from_utf8_lossy(&out.stdout).trim(),
-        "/sandbox",
-        "sandbox home directory is not /sandbox"
-    );
-}
-
 fn check_packages(image: &str) {
     for pkg in ["curl", "ip", "tar"] {
         let out = run_in_image(image, &format!("which {pkg}"));
         assert!(out.status.success(), "{pkg} not found in image");
     }
-}
-
-fn check_bash_entrypoint(image: &str) {
-    let out = Command::new("podman")
-        .args(["inspect", "--format", "{{json .Config.Entrypoint}}", image])
-        .output()
-        .expect("podman inspect should execute");
-    assert!(out.status.success(), "podman inspect failed");
-
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(
-        stdout.contains("/bin/bash"),
-        "expected /bin/bash entrypoint, got: {stdout}"
-    );
 }
 
 fn check_policy_yaml(image: &str) {
@@ -844,20 +802,8 @@ macro_rules! image_tests {
 
             #[test]
             #[ignore]
-            fn users_and_groups_exist() {
-                check_users_and_groups($image_fn());
-            }
-
-            #[test]
-            #[ignore]
             fn packages_installed() {
                 check_packages($image_fn());
-            }
-
-            #[test]
-            #[ignore]
-            fn bash_entrypoint() {
-                check_bash_entrypoint($image_fn());
             }
 
             #[test]
@@ -1693,21 +1639,6 @@ mod agent_settings_claude {
             "claude settings file should not be present in image built without agent settings"
         );
     }
-
-    #[test]
-    #[ignore]
-    fn settings_file_owned_by_sandbox() {
-        let out = run_in_image(
-            ubuntu_claude_settings_image(),
-            "stat -c '%U' /sandbox/my-claude-settings",
-        );
-        assert!(out.status.success(), "failed to stat claude settings file");
-        assert_eq!(
-            String::from_utf8_lossy(&out.stdout).trim(),
-            "sandbox",
-            "claude settings file not owned by sandbox"
-        );
-    }
 }
 
 mod agent_settings_opencode {
@@ -1736,24 +1667,6 @@ mod agent_settings_opencode {
         assert!(
             !out.status.success(),
             "opencode settings file should not be present in image built without agent settings"
-        );
-    }
-
-    #[test]
-    #[ignore]
-    fn settings_file_owned_by_sandbox() {
-        let out = run_in_image(
-            ubuntu_opencode_settings_image(),
-            "stat -c '%U' /sandbox/my-opencode-settings",
-        );
-        assert!(
-            out.status.success(),
-            "failed to stat opencode settings file"
-        );
-        assert_eq!(
-            String::from_utf8_lossy(&out.stdout).trim(),
-            "sandbox",
-            "opencode settings file not owned by sandbox"
         );
     }
 }
@@ -1795,18 +1708,6 @@ mod claude_onboarding {
         assert!(
             out.status.success(),
             "hasTrustDialogAccepted is not true in .claude.json"
-        );
-    }
-
-    #[test]
-    #[ignore]
-    fn claude_json_owned_by_sandbox() {
-        let out = run_in_image(ubuntu_claude_image(), "stat -c '%U' /sandbox/.claude.json");
-        assert!(out.status.success(), "failed to stat .claude.json");
-        assert_eq!(
-            String::from_utf8_lossy(&out.stdout).trim(),
-            "sandbox",
-            ".claude.json not owned by sandbox"
         );
     }
 
@@ -1882,21 +1783,6 @@ mod skills_claude {
 
     #[test]
     #[ignore]
-    fn skill_dir_owned_by_sandbox() {
-        let out = run_in_image(
-            ubuntu_claude_skills_image(),
-            "stat -c '%U' /sandbox/.claude/skills/my-skill",
-        );
-        assert!(out.status.success(), "failed to stat skill directory");
-        assert_eq!(
-            String::from_utf8_lossy(&out.stdout).trim(),
-            "sandbox",
-            "skill directory not owned by sandbox"
-        );
-    }
-
-    #[test]
-    #[ignore]
     fn skill_not_present_in_image_without_skills() {
         let out = run_in_image(
             ubuntu_claude_image(),
@@ -1935,21 +1821,6 @@ mod skills_opencode {
         assert!(
             out.status.success(),
             "SKILL.md not found in /sandbox/.opencode/skills/my-skill/"
-        );
-    }
-
-    #[test]
-    #[ignore]
-    fn skill_dir_owned_by_sandbox() {
-        let out = run_in_image(
-            ubuntu_opencode_skills_image(),
-            "stat -c '%U' /sandbox/.opencode/skills/my-skill",
-        );
-        assert!(out.status.success(), "failed to stat skill directory");
-        assert_eq!(
-            String::from_utf8_lossy(&out.stdout).trim(),
-            "sandbox",
-            "skill directory not owned by sandbox"
         );
     }
 
@@ -2099,21 +1970,6 @@ mod opencode_ollama {
         assert!(
             out.status.success(),
             "lfm2.5 not found in opencode config.json"
-        );
-    }
-
-    #[test]
-    #[ignore]
-    fn config_json_owned_by_sandbox() {
-        let out = run_in_image(
-            ubuntu_opencode_ollama_image(),
-            "stat -c '%U' /sandbox/.config/opencode/config.json",
-        );
-        assert!(out.status.success(), "failed to stat opencode config.json");
-        assert_eq!(
-            String::from_utf8_lossy(&out.stdout).trim(),
-            "sandbox",
-            "opencode config.json not owned by sandbox"
         );
     }
 
@@ -2310,21 +2166,6 @@ mod model_claude_anthropic {
 
     #[test]
     #[ignore]
-    fn claude_settings_json_owned_by_sandbox() {
-        let out = run_in_image(
-            ubuntu_claude_anthropic_model_image(),
-            "stat -c '%U' /sandbox/.claude/settings.json",
-        );
-        assert!(out.status.success(), "failed to stat .claude/settings.json");
-        assert_eq!(
-            String::from_utf8_lossy(&out.stdout).trim(),
-            "sandbox",
-            ".claude/settings.json not owned by sandbox"
-        );
-    }
-
-    #[test]
-    #[ignore]
     fn claude_settings_json_not_present_without_model() {
         let out = run_in_image(
             ubuntu_claude_image(),
@@ -2412,21 +2253,6 @@ mod model_opencode_anthropic {
             "opencode config.json should not be present when built without --model or --endpoint"
         );
     }
-
-    #[test]
-    #[ignore]
-    fn opencode_config_json_owned_by_sandbox() {
-        let out = run_in_image(
-            ubuntu_opencode_anthropic_model_image(),
-            "stat -c '%U' /sandbox/.config/opencode/config.json",
-        );
-        assert!(out.status.success(), "failed to stat opencode config.json");
-        assert_eq!(
-            String::from_utf8_lossy(&out.stdout).trim(),
-            "sandbox",
-            "opencode config.json not owned by sandbox"
-        );
-    }
 }
 
 // opencode + ollama + model: config.json uses "ollama/<model>" prefix, only specified model listed
@@ -2502,21 +2328,6 @@ mod model_opencode_openai {
         assert!(
             out.status.success(),
             "prefixed model value openai/{MODEL_OPENAI} not found in opencode config.json"
-        );
-    }
-
-    #[test]
-    #[ignore]
-    fn config_json_owned_by_sandbox() {
-        let out = run_in_image(
-            ubuntu_opencode_openai_model_image(),
-            "stat -c '%U' /sandbox/.config/opencode/config.json",
-        );
-        assert!(out.status.success(), "failed to stat opencode config.json");
-        assert_eq!(
-            String::from_utf8_lossy(&out.stdout).trim(),
-            "sandbox",
-            "opencode config.json not owned by sandbox"
         );
     }
 }

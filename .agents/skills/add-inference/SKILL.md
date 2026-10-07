@@ -224,7 +224,6 @@ Add `image_tests!` calls for the new combinations, then add every new tag to the
 If the provider writes config files or env vars, add a `mod myprovider { ... }` block with:
 - Positive assertion (expected file/env var is present).
 - Content assertion (expected host/key appears in the file).
-- Ownership assertion (`stat -c '%U'` returns `"sandbox"`).
 - Negative assertion (artifact absent when provider not selected).
 - Rejection test if `--endpoint` is unsupported (no `#[ignore]` needed — never calls podman).
 
@@ -263,7 +262,7 @@ This keeps the reference list accurate and gives the next contributor a concrete
 - [ ] `build_policy_with_myprovider_*` unit tests added in `src/main.rs`
 - [ ] Integration test policy check helper added; `image_tests!` macro and all existing calls updated
 - [ ] Image singletons, accessors, `image_tests!` calls, and cleanup entries added
-- [ ] Behavioural `mod` block written with positive, content, ownership, negative, and rejection tests
+- [ ] Behavioural `mod` block written with positive, content, negative, and rejection tests
 - [ ] `.agents/skills/add-inference/SKILL.md` Description updated with the new provider entry
 - [ ] README updated: inference table, endpoint table, model table, agent×inference table, policy section, option reference
 - [ ] `/check` passes (fmt + clippy + unit tests)

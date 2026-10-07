@@ -34,7 +34,7 @@ impl Agent for OpencodeAgent {
     fn install(&self) -> String {
         // The installer places the binary in ~/.opencode/bin/ which is not in PATH,
         // so we symlink it into ~/.local/bin/.
-        "RUN cd /tmp && curl -fsSL https://opencode.ai/install | bash && \\\n    \
+        "RUN mkdir -p /sandbox && cd /tmp && curl -fsSL https://opencode.ai/install | HOME=/sandbox bash && \\\n    \
              mkdir -p /sandbox/.local/bin && \\\n    \
              ln -sf /sandbox/.opencode/bin/opencode /sandbox/.local/bin/opencode && \\\n    \
              mkdir -p /sandbox/.config/opencode\n\

@@ -133,7 +133,6 @@ For flags that write files into the image context, test through `stage_agent_set
 
 Add a `mod my_flag { use super::*; ... }` block with at least:
 - A positive assertion (the expected file, env var, or policy rule is present).
-- An ownership assertion (`stat -c '%U'` returns `"sandbox"`).
 - A negative assertion (the artifact is absent when the flag is not passed).
 - A rejection test if the flag has an invalid-combination case — rejection tests do not need `#[ignore]` because they never call podman.
 
@@ -185,7 +184,7 @@ The section should cover: what the flag does, any per-agent or per-agent×infere
 - [ ] New enum variant exported under `#[cfg(test)]` if applicable
 - [ ] Unit tests cover the happy path, rejection, and any file-content assertions
 - [ ] Integration test singleton + accessor + cleanup entry added
-- [ ] Integration test `mod` block covers positive, ownership, negative, and rejection cases
+- [ ] Integration test `mod` block covers positive, negative, and rejection cases
 - [ ] README "Full option reference" table updated
 - [ ] README intro layer list updated if the flag adds a new layer or sub-capability
 - [ ] README "Agent Supported Features" table updated if the flag is agent-gated

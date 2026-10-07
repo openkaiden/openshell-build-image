@@ -8,7 +8,7 @@ Project-specific skills for openshell-build-image.
 |---|---|
 | [`check`](check/SKILL.md) | Run the pre-commit check suite (fmt + clippy + unit tests) and auto-fix formatting if needed |
 | [`integration-tests`](integration-tests/SKILL.md) | Run the integration tests in `tests/integration_test.rs` against real container images built with podman |
-| [`debug-image`](debug-image/SKILL.md) | Inspect a built test image interactively to diagnose a failing integration test — binaries, policy, config files, ownership |
+| [`debug-image`](debug-image/SKILL.md) | Inspect a built test image interactively to diagnose a failing integration test — binaries, policy, and config files |
 | [`sandbox-policy`](sandbox-policy/SKILL.md) | Understand and edit the sandbox policy — base YAML, network rule schema, inference and agent fragment merging, testing |
 | [`vm-runtime`](vm-runtime/SKILL.md) | Build, sign, and run the `--runtime vm` backend — the libkrun microVM, its embedded root filesystem, and the errors each step can produce |
 | [`update-github-action`](update-github-action/SKILL.md) | Add or update a GitHub Actions step — fetch the latest release SHA and write the correctly pinned uses line |

@@ -781,7 +781,7 @@ mod tests {
             // `run` deletes the context directory as soon as it returns, so the
             // Containerfile has to be read here, while the VM would see it.
             let containerfile = std::fs::read_to_string(build.context.join("Containerfile"))?;
-            if containerfile.contains("COPY --chown=sandbox:sandbox build-containerfile") {
+            if containerfile.contains("COPY build-containerfile") {
                 assert_eq!(
                     std::fs::read_to_string(build.context.join("build-containerfile"))?,
                     containerfile
@@ -1260,9 +1260,7 @@ mod tests {
                 assert_eq!(staged.exists(), self.0);
                 if self.0 {
                     assert_eq!(std::fs::read_to_string(staged)?, used);
-                    assert!(used.contains(
-                        "COPY --chown=sandbox:sandbox build-containerfile ${HOME}/Containerfile"
-                    ));
+                    assert!(used.contains("COPY build-containerfile /tmp/build-containerfile"));
                 } else {
                     assert!(!used.contains("build-containerfile"));
                 }
@@ -2119,7 +2117,7 @@ mod tests {
         // The VM reads the Containerfile through the context share, so it must
         // have been written into the context directory before the VM booted.
         let cf = runner.containerfile();
-        assert!(cf.contains("build-containerfile ${HOME}/Containerfile"));
+        assert!(cf.contains("RUN cp /tmp/build-containerfile \"$HOME/Containerfile\""));
         assert!(cf.contains("FROM"), "unexpected Containerfile: {cf}");
         assert!(cf.contains("claude"), "expected the agent install in: {cf}");
     }

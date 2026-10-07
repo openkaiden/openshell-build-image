@@ -52,9 +52,9 @@ If the user passes an argument to this skill, use it as the filter.
 
 **`build_image(tag, extra_args)`** — calls the compiled binary, appends the tag, asserts success, returns the tag string. `extra_args` maps directly to CLI flags (`--agent`, `--inference`, `--config`, …).
 
-**`run_in_image(image, cmd)`** — runs `podman run --rm <image> -c <cmd>` (bash `-c`) and returns the raw `Output`. The entrypoint is `/bin/bash`, so `cmd` is a shell expression. Always returns even on non-zero exit — callers check `out.status.success()` themselves.
+**`run_in_image(image, cmd)`** — runs `podman run --rm --entrypoint /bin/bash <image> -c <cmd>` and returns the raw `Output`. The command is a shell expression. Bash is invoked explicitly because the generated image inherits its entrypoint from the base image. Always returns even on non-zero exit — callers check `out.status.success()` themselves.
 
-**`check_*` helpers** — thin wrappers around `run_in_image` and `assert!` / `assert_eq!` for assertions that appear in multiple test modules (users, packages, policy rules, binary presence, …). Extract a new helper when the same `run_in_image` + assertion pattern appears in more than one place.
+**`check_*` helpers** — thin wrappers around `run_in_image` and `assert!` / `assert_eq!` for assertions that appear in multiple test modules (packages, policy rules, binary presence, …). Extract a new helper when the same `run_in_image` + assertion pattern appears in more than one place.
 
 ### Image singletons (`OnceLock`)
 
@@ -76,7 +76,7 @@ The tag must end with `:integration` (the cleanup destructor filters by that suf
 
 ### The `image_tests!` macro
 
-Generates the standard matrix of eleven checks for one image:
+Generates the standard matrix of ten checks for one image:
 
 ```rust
 image_tests!(
@@ -86,11 +86,12 @@ image_tests!(
     has_opencode: bool,
     has_anthropic: bool,
     has_vertexai: bool,
-    has_ollama: bool
+    has_ollama: bool,
+    has_openai: bool
 );
 ```
 
-Every generated test is `#[ignore]`. The booleans control which policy rules and which binaries in `$PATH` are expected to be present. All eleven checks (users, groups, packages, entrypoint, policy file, claude policy, opencode policy, anthropic policy, vertexai policy, ollama policy, binary presence) run against the same image accessor.
+Every generated test is `#[ignore]`. The booleans control which policy rules and which binaries in `$PATH` are expected to be present. All ten checks (packages, Claude and OpenCode binary presence, policy file, and Claude, OpenCode, Anthropic, Vertex AI, Ollama, and OpenAI policy rules) run against the same image accessor.
 
 ### Feature test macros
 
@@ -110,22 +111,10 @@ mod my_feature {
         let out = run_in_image(my_image(), "test -f /sandbox/my-file");
         assert!(out.status.success(), "my-file not found");
     }
-
-    #[test]
-    #[ignore]
-    fn file_owned_by_sandbox() {
-        let out = run_in_image(my_image(), "stat -c '%U' /sandbox/my-file");
-        assert!(out.status.success(), "stat failed");
-        assert_eq!(
-            String::from_utf8_lossy(&out.stdout).trim(),
-            "sandbox",
-            "my-file not owned by sandbox"
-        );
-    }
 }
 ```
 
-Ownership checks (`stat -c '%U'`) and presence checks (`test -f`, `test -d`, `which`, `grep -q`) are the two most common patterns. Always include a negative test (same assertion on an image built without the feature) to guard against false positives.
+Presence checks (`test -f`, `test -d`, `which`) and content checks (`grep -q`) are common patterns. Always include a negative test (same assertion on an image built without the feature) to guard against false positives.
 
 Tests that only run the binary and check its exit code or stderr (rejection tests) do not need podman and should **not** be marked `#[ignore]` — they run in the normal `cargo test` pass.
 
@@ -154,7 +143,7 @@ Add the `check_*` helper function, then add a new `#[test] #[ignore] fn` inside 
 
 1. If the test needs a new image, add the singleton and accessor (steps 1–2 above) and add the tag to `cleanup_images`.
 2. Add a `mod my_feature { use super::*; … }` block at the logical location in the file (group with related mods).
-3. Write at least: one positive assertion, one ownership assertion (`stat -c '%U'`), and one negative assertion (the artifact must not appear in a baseline image built without the feature).
+3. Write at least: one positive assertion, one content assertion where applicable, and one negative assertion (the artifact must not appear in a baseline image built without the feature).
 
 ### Cleanup
 

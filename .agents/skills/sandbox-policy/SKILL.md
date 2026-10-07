@@ -9,11 +9,11 @@ How the sandbox policy is assembled, what each section means, and how to add or 
 
 ## Description
 
-Every built image contains `/etc/openshell/policy.yaml`. The openshell runtime reads it at startup to configure filesystem access, the user the agent runs as, and which network endpoints each binary is allowed to reach.
+Every built image contains `/etc/openshell/policy.yaml`. The openshell runtime reads it at startup to configure filesystem access, optional process settings, and which network endpoints each binary is allowed to reach.
 
 The final policy is assembled by `build_policy()` in `src/main.rs` by merging four sources:
 
-1. **Base policy** — `assets/policy.yaml`, committed to the repo. Contains filesystem and process config, plus baseline network rules shared by all images (git, gh CLI).
+1. **Base policy** — `assets/policy.yaml`, committed to the repo. Contains filesystem config and baseline network rules shared by all images (git, gh CLI).
 2. **Inference fragment** — returned by `Inference::policy_yaml(agent_binary, base_url)`. Adds network rules for the LLM backend. Only included when both `--agent` and `--inference` are given (the method needs the agent binary path to scope the rule).
 3. **Agent fragment** — returned by `Agent::policy_yaml()`. Adds agent-specific network rules (e.g., Claude needs `platform.claude.com` for telemetry). Only included if the string is non-empty.
 4. **Workspace fragment** — constructed from `workspace.network.hosts` in `.kaiden/workspace.json`. Adds a single `workspace` rule whose endpoints are the user-declared hosts and whose binaries are the four PATH globs (`/bin/**`, `/usr/bin/**`, `/usr/local/bin/**`, `/sandbox/.local/bin/**`) plus the agent binary when present. Only included when `network.hosts` is non-empty. An invalid host entry causes the build to fail immediately.
@@ -35,10 +35,6 @@ filesystem_policy:          # what paths the agent can read/write
 landlock:
   compatibility: best_effort
 
-process:
-  run_as_user:  sandbox
-  run_as_group: sandbox
-
 network_policies:           # keyed map — key is the merge slug
   <slug>:
     name: <display-name>
@@ -46,7 +42,7 @@ network_policies:           # keyed map — key is the merge slug
     binaries:  [...]
 ```
 
-Only `version` and `network_policies` are required. The other three sections are optional and only appear in the base policy.
+Only `version` is required. All other sections, including `network_policies`, are optional; an omitted `network_policies` defaults to an empty map.
 
 ### Network endpoint fields
 

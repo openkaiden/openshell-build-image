@@ -67,8 +67,8 @@ impl super::Agent for MyAgent {
 
     fn install(&self) -> String {
         // Returns a Containerfile RUN instruction (and ENV PATH extension) that
-        // installs the agent binary under the sandbox user. Follow the curl
-        // pattern used by both existing agents:
+        // installs the agent binary at its chosen path under /sandbox. Follow
+        // the curl pattern used by both existing agents:
         //   RUN curl -fsSL https://... | sh
         //   ENV PATH=/sandbox/.local/bin:$PATH
         "RUN curl -fsSL https://myagent.example.com/install.sh | sh\n\
@@ -210,7 +210,7 @@ mod tests {
 }
 ```
 
-If per-inference config submodules exist (`src/agent/myagent/anthropic.rs` etc.), add unit tests inside each submodule following the `opencode::anthropic` pattern: assert the config file key, the host/model appearing in the value, and the ownership path.
+If per-inference config submodules exist (`src/agent/myagent/anthropic.rs` etc.), add unit tests inside each submodule following the `opencode::anthropic` pattern: assert the config file key and the host/model appearing in the value.
 
 ### In `src/main.rs` (`#[cfg(test)]`)
 
@@ -312,10 +312,10 @@ Add every new image tag to the `cleanup_images` array in the `#[ctor::dtor]` blo
 Add a `mod myagent { use super::*; ... }` block with:
 
 - **Binary in PATH** — `which myagent` succeeds in an image built with `--agent myagent`.
-- **Onboarding skip** — if `skip_onboarding()` writes a file, assert the file exists and its ownership is `sandbox`.
-- **Inference config** — if `set_inference()` writes config files, assert the file exists, contains the expected host/model, and is owned by `sandbox`.
+- **Onboarding skip** — if `skip_onboarding()` writes a file, assert the file exists.
+- **Inference config** — if `set_inference()` writes config files, assert the file exists and contains the expected host/model.
 - **Env var** — if `env_vars()` returns entries, assert they are set in the image.
-- **Skills dir** — if `skills_dir()` is non-empty, assert the directory exists and is owned by `sandbox`.
+- **Skills dir** — if `skills_dir()` is non-empty, assert the directory exists.
 - **Negative** — assert the binary is absent in an image built without `--agent myagent`.
 
 ## Step 6 — update `.agents/skills/add-agent/SKILL.md`

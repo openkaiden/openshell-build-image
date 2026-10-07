@@ -42,8 +42,8 @@ The tool assembles the image in layers — base image, agent installation, agent
 
 | Agent      | User settings | Auto-onboarding | Skills |
 | ---------- | ------------- | --------------- | ------ |
-| `claude`   | Yes           | Yes             | Yes<br>`~/.claude/skills/`   |
-| `opencode` | Yes           | N/A             | Yes<br>`~/.opencode/skills/` |
+| `claude`   | Yes           | Yes             | Yes<br>`/sandbox/.claude/skills/`   |
+| `opencode` | Yes           | N/A             | Yes<br>`/sandbox/.opencode/skills/` |
 
 ### Agent × Inference Supported Features
 
@@ -318,7 +318,7 @@ openshell-build-image --runtime podman --agent opencode myimage:latest
 
 Pass `--with-agent-settings` to generate and include agent settings in the image. Without this flag, no settings files are written and no auto-configuration is applied — the image contains only the agent binary.
 
-You can pre-populate the sandbox home directory with settings files specific to an agent. Place the files under:
+You can pre-populate `/sandbox/` with settings files specific to an agent. Place the files under:
 
 ```
 <settings dir>/agents/<agent>/
@@ -326,7 +326,7 @@ You can pre-populate the sandbox home directory with settings files specific to 
 
 where `<settings dir>` is the directory described in [Configuring the base image](#configuring-the-base-image), and `<agent>` matches the value passed to `--agent` (`claude` or `opencode`).
 
-All files and subdirectories are copied into `/sandbox/` (the sandbox user's home directory), owned by the `sandbox` user. The copy happens before the agent is installed, so the agent installer can create additional files on top without overwriting your settings.
+All files and subdirectories are copied into `/sandbox/`. The copy happens before the agent is installed, so the agent installer can create additional files on top without overwriting your settings.
 
 ### Example — Claude Code settings file
 
@@ -357,7 +357,7 @@ The file will be present at `/sandbox/.config/opencode/config.json` in the image
 When `--agent claude --with-agent-settings` is used, the builder automatically creates or updates `/sandbox/.claude.json` with the following settings to skip the interactive onboarding dialogs that would otherwise appear on first launch:
 
 - `hasCompletedOnboarding: true` — marks the setup wizard as complete.
-- `projects["/sandbox"].hasTrustDialogAccepted: true` — pre-accepts the workspace trust prompt for the sandbox home directory.
+- `projects["/sandbox"].hasTrustDialogAccepted: true` — pre-accepts the workspace trust prompt for the `/sandbox` project directory.
 
 If you provide your own `.claude.json` in the agent settings directory, the builder merges these fields into it, preserving any other fields you have set.
 
@@ -484,7 +484,7 @@ When `--model` is also given, the top-level `"model"` field is added (as `"ollam
 
 Pass `--with-policy` to include `/etc/openshell/policy.yaml` in the image. Without this flag, no policy file is written and the image contains no OpenShell policy. The policy file is read by the OpenShell runtime and defines the sandbox security policy for the container:
 
-- **Filesystem policy** — which paths are read-only, read-write, or inaccessible to the `sandbox` user.
+- **Filesystem policy** — which paths are read-only, read-write, or inaccessible to processes in the sandbox.
 - **Network policies** — which binaries are allowed to connect to which hosts and ports.
 
 ```sh
@@ -569,7 +569,7 @@ During the build, each skill directory is copied into the agent's skills directo
 | `claude`   | `/sandbox/.claude/skills/`     |
 | `opencode` | `/sandbox/.opencode/skills/`   |
 
-With `--agent claude` and `"skills": ["./my-skill"]`, the skill lands at `/sandbox/.claude/skills/my-skill/` in the image, owned by the `sandbox` user.
+With `--agent claude` and `"skills": ["./my-skill"]`, the skill lands at `/sandbox/.claude/skills/my-skill/` in the image.
 
 Skills without a corresponding `--agent` flag are silently ignored — the agent determines where skills go, so a build without an agent produces no skill COPY instructions.
 
@@ -642,11 +642,11 @@ With this configuration, `cargo build` and `cargo fetch` inside the sandbox can 
 
 ## Saving the Containerfile
 
-Pass `--copy-containerfile` to include the exact Containerfile used for the build at `$HOME/Containerfile` **inside the image** (`/sandbox/Containerfile`), owned by the `sandbox` user.
+Pass `--copy-containerfile` to include the exact Containerfile used for the build at `$HOME/Containerfile` **inside the image**, using the home directory and user inherited from the base image.
 
 ```sh
 openshell-build-image --runtime podman --copy-containerfile myimage:latest
-podman run --rm myimage:latest -c 'cat "$HOME/Containerfile"'
+podman run --rm --entrypoint /bin/sh myimage:latest -c 'cat "$HOME/Containerfile"'
 ```
 
 ## Full option reference
@@ -665,7 +665,7 @@ openshell-build-image [OPTIONS] <TAG>
 | `--endpoint <URL>`             | Override the inference provider's default endpoint URL (see [Custom endpoint](#custom-endpoint---endpoint)) |
 | `--model <MODEL>`              | Default model for the agent to use (see [Default model](#default-model---model)) |
 | `--with-workspace-config`      | Read `.kaiden/workspace.json` and apply its features, skills, and network rules |
-| `--copy-containerfile`         | Copy the build Containerfile to `$HOME/Containerfile` inside the image (`/sandbox/Containerfile`) |
+| `--copy-containerfile`         | Copy the build Containerfile to `$HOME/Containerfile` inside the image |
 | `--with-policy`                | Include OpenShell sandbox policy (`/etc/openshell/policy.yaml`) in the image   |
 | `--with-agent-settings`        | Generate and include agent settings in the image (see [Agent settings](#agent-settings)) |
 | `--ssl-certs <FILE>`           | Use a specific CA bundle instead of the auto-discovered one (see [Corporate proxy support](#corporate-proxy-support---ssl-certs)). The build fails immediately if the file does not exist. |

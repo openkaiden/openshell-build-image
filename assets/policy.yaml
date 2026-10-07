@@ -25,10 +25,6 @@ filesystem_policy:
 landlock:
   compatibility: best_effort
 
-process:
-  run_as_user: sandbox
-  run_as_group: sandbox
-
 # --- Network policies (queried per-CONNECT request) ---
 #
 # Each named policy maps a set of allowed (binary, endpoint) pairs.
@@ -74,4 +70,3 @@ network_policies:
         access: read-only
     binaries:
       - { path: /usr/bin/gh }
-

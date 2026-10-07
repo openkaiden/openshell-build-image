@@ -31,7 +31,7 @@ impl Agent for ClaudeAgent {
     }
 
     fn install(&self) -> String {
-        "RUN curl -fsSL https://claude.ai/install.sh | bash\nENV PATH=/sandbox/.local/bin:$PATH"
+        "RUN mkdir -p /sandbox && curl -fsSL https://claude.ai/install.sh | HOME=/sandbox bash\nENV PATH=/sandbox/.local/bin:$PATH"
             .to_string()
     }
 
