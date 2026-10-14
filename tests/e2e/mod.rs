@@ -92,14 +92,21 @@ impl Process {
         // Reap the leader, but its exit does not imply that its descendants exited.
         self.0.try_wait()?;
         // SAFETY: commands start in a group whose ID is the child's PID.
-        if unsafe { libc::kill(-(self.0.id() as i32), 0) } == 0 {
+        let group = -(self.0.id() as i32);
+        if unsafe { libc::kill(group, 0) } == 0 {
             return Ok(false);
         }
         let error = io::Error::last_os_error();
-        if error.raw_os_error() == Some(libc::ESRCH) {
-            Ok(true)
-        } else {
-            Err(error.into())
+        match error.raw_os_error() {
+            Some(libc::ESRCH) => Ok(true),
+            // EPERM means the group exists, although not every member can be
+            // signalled. Keep trying to stop it until the cleanup deadline.
+            Some(libc::EPERM) => Ok(false),
+            _ => Err(io::Error::new(
+                error.kind(),
+                format!("checking process group {}: {error}", -group),
+            )
+            .into()),
         }
     }
 
@@ -107,19 +114,46 @@ impl Process {
         if self.group_gone()? {
             return Ok(());
         }
+        let group = -(self.0.id() as i32);
+        let mut permission_denied = false;
         for (signal, seconds) in [(libc::SIGTERM, 15), (libc::SIGKILL, 5)] {
-            // SAFETY: the child was started in its own process group; a negative PID
-            // addresses that group and cannot target the test runner's group.
-            unsafe { libc::kill(-(self.0.id() as i32), signal) };
             let deadline = Instant::now() + Duration::from_secs(seconds);
+            let mut signalled = false;
             while Instant::now() < deadline {
                 if self.group_gone()? {
                     return Ok(());
                 }
+                if !signalled {
+                    // SAFETY: the child was started in its own process group; a
+                    // negative PID addresses that group, not the test runner.
+                    if unsafe { libc::kill(group, signal) } == 0 {
+                        signalled = true;
+                        permission_denied = false;
+                    } else {
+                        let error = io::Error::last_os_error();
+                        match error.raw_os_error() {
+                            Some(libc::ESRCH) => return Ok(()),
+                            Some(libc::EPERM) => permission_denied = true,
+                            Some(libc::EINTR) => {}
+                            _ => {
+                                return Err(io::Error::new(
+                                    error.kind(),
+                                    format!("signalling process group {}: {error}", -group),
+                                )
+                                .into());
+                            }
+                        }
+                    }
+                }
                 thread::sleep(Duration::from_millis(100));
             }
         }
-        Err(io::Error::other("process group did not stop").into())
+        let reason = if permission_denied {
+            " (signalling was denied)"
+        } else {
+            ""
+        };
+        Err(io::Error::other(format!("process group {} did not stop{reason}", -group)).into())
     }
 }
 impl Drop for Process {
@@ -440,15 +474,30 @@ mod tests {
     }
     #[test]
     fn cleanup_stops_group_members_after_leader_exits() -> Result<()> {
-        let mut leader = Process(Command::new("sleep").arg("30").process_group(0).spawn()?);
+        let mut leader = Process(
+            Command::new("sleep")
+                .arg("30")
+                .process_group(0)
+                .spawn()
+                .map_err(|error| {
+                    io::Error::new(error.kind(), format!("spawning group leader: {error}"))
+                })?,
+        );
         // Keep the other group member as our child so it can be reaped even on
         // systems whose init process does not promptly reap orphaned processes.
         let mut member = Command::new("sleep")
             .arg("30")
             .process_group(leader.0.id() as i32)
-            .spawn()?;
-        leader.0.kill()?;
-        leader.0.wait()?;
+            .spawn()
+            .map_err(|error| {
+                io::Error::new(error.kind(), format!("spawning group member: {error}"))
+            })?;
+        leader.0.kill().map_err(|error| {
+            io::Error::new(error.kind(), format!("killing group leader: {error}"))
+        })?;
+        leader.0.wait().map_err(|error| {
+            io::Error::new(error.kind(), format!("reaping group leader: {error}"))
+        })?;
         assert!(!leader.group_gone()?);
         let (sender, receiver) = mpsc::channel();
         let reaper = thread::spawn(move || {
@@ -483,7 +532,11 @@ mod tests {
             "echo started; exec sleep 30",
         )?;
         let result = scenario.command_output(&[], "timeout-test", 1, true);
-        assert!(result.unwrap_err().to_string().contains("exceeded 1s"));
+        let error = result.unwrap_err();
+        assert!(
+            error.to_string().contains("exceeded 1s"),
+            "unexpected command error: {error}"
+        );
         assert!(
             fs::read_to_string(scenario.artifacts.join("timeout-test.log"))?.contains("started")
         );
