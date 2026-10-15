@@ -382,37 +382,56 @@ fn run(
         }
         _ => None,
     };
-    let context_dir = tempfile::Builder::new()
-        .prefix("openshell-build-image")
-        .tempdir()?;
-    let base = prepared
-        .as_ref()
-        .map_or(from, |prepared| prepared.base.as_str());
-    let resolved = prepared
-        .as_ref()
-        .map_or(&[][..], |prepared| prepared.addons.as_slice());
-    let output = containerfile::generate(base, copy_containerfile, resolved)?;
-    if copy_containerfile {
-        std::fs::write(context_dir.path().join("build-containerfile"), &output)?;
-    }
-    match backend {
-        Backend::Cli(cli, runner) if prepared.is_some() => {
-            let prepared = prepared.as_ref().expect("prepared for addon build");
-            build_with_local_images_on_platform(
-                &output,
-                tag,
-                cli,
-                *runner,
-                context_dir.path(),
-                &prepared.platform,
-            )?
+    let mut docker_base = match (backend, prepared.as_ref()) {
+        (Backend::Cli(ContainerCli::Docker, runner), Some(prepared)) => Some(
+            host_addon::DockerBuildBase::new(from, &prepared.base, *runner)?,
+        ),
+        _ => None,
+    };
+    let result = (|| -> Result<(), Box<dyn std::error::Error>> {
+        let context_dir = tempfile::Builder::new()
+            .prefix("openshell-build-image")
+            .tempdir()?;
+        let base = docker_base
+            .as_ref()
+            .map(|base| base.reference())
+            .or_else(|| prepared.as_ref().map(|prepared| prepared.base.as_str()))
+            .unwrap_or(from);
+        let resolved = prepared
+            .as_ref()
+            .map_or(&[][..], |prepared| prepared.addons.as_slice());
+        let output = containerfile::generate(base, copy_containerfile, resolved)?;
+        if copy_containerfile {
+            std::fs::write(context_dir.path().join("build-containerfile"), &output)?;
         }
-        Backend::Cli(cli, runner) => build(&output, tag, cli, *runner, context_dir.path())?,
-        Backend::Vm(config, runner, vm_output) => {
-            vm_build(&output, tag, config, *runner, context_dir.path(), vm_output)?
+        match backend {
+            Backend::Cli(cli, runner) if prepared.is_some() => {
+                let prepared = prepared.as_ref().expect("prepared for addon build");
+                build_with_local_images_on_platform(
+                    &output,
+                    tag,
+                    cli,
+                    *runner,
+                    context_dir.path(),
+                    &prepared.platform,
+                )?
+            }
+            Backend::Cli(cli, runner) => build(&output, tag, cli, *runner, context_dir.path())?,
+            Backend::Vm(config, runner, vm_output) => {
+                vm_build(&output, tag, config, *runner, context_dir.path(), vm_output)?
+            }
+        }
+        Ok(())
+    })();
+    let cleanup = docker_base.as_mut().map_or(Ok(()), |base| base.cleanup());
+    match (result, cleanup) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(reason), Ok(())) => Err(reason),
+        (Ok(()), Err(reason)) => Err(reason.into()),
+        (Err(build), Err(cleanup)) => {
+            Err(std::io::Error::other(format!("{build}; cleanup also failed: {cleanup}")).into())
         }
     }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -764,6 +783,101 @@ mod tests {
             &Backend::Cli(&ContainerCli::Podman, &FakeRunner(1)),
         );
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn docker_addon_build_uses_a_local_base_tag_and_cleans_it_up() {
+        use std::cell::RefCell;
+        use std::process::Output;
+
+        struct DockerCapture {
+            commands: RefCell<Vec<Vec<String>>>,
+            containerfile: RefCell<String>,
+            fail_build: bool,
+        }
+
+        impl Runner for DockerCapture {
+            fn run(&self, cmd: &mut Command) -> std::io::Result<ExitStatus> {
+                let args: Vec<String> = std::iter::once(cmd.get_program())
+                    .chain(cmd.get_args())
+                    .map(|arg| arg.to_string_lossy().into_owned())
+                    .collect();
+                if args[1] == "build" {
+                    let file = args[args.iter().position(|arg| arg == "-f").unwrap() + 1].clone();
+                    *self.containerfile.borrow_mut() = std::fs::read_to_string(file)?;
+                }
+                self.commands.borrow_mut().push(args.clone());
+                FakeRunner(i32::from(args[1] == "build" && self.fail_build)).run(cmd)
+            }
+
+            fn output(&self, cmd: &mut Command) -> std::io::Result<Output> {
+                let args: Vec<String> = std::iter::once(cmd.get_program())
+                    .chain(cmd.get_args())
+                    .map(|arg| arg.to_string_lossy().into_owned())
+                    .collect();
+                let digest = format!("sha256:{}", "b".repeat(64));
+                let value = if args[1] == "manifest" {
+                    serde_json::json!({
+                        "schemaVersion": 2,
+                        "mediaType": "application/vnd.oci.image.index.v1+json",
+                        "manifests": [{
+                            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+                            "digest": digest,
+                            "platform": {"os": "linux", "architecture": "arm64"}
+                        }]
+                    })
+                } else if args[3] == "example.test/base:latest" {
+                    serde_json::json!([{
+                        "Id": format!("sha256:{}", "a".repeat(64)),
+                        "Os": "linux",
+                        "Architecture": "arm64"
+                    }])
+                } else {
+                    assert_eq!(args[3], format!("example.test/addon@{digest}"));
+                    serde_json::json!([{
+                        "Os": "linux",
+                        "Architecture": "arm64",
+                        "Config": {"Env": ["ADDON_TEST=selected"]}
+                    }])
+                };
+                self.commands.borrow_mut().push(args);
+                Ok(Output {
+                    status: FakeRunner(0).run(cmd)?,
+                    stdout: serde_json::to_vec(&value).unwrap(),
+                    stderr: Vec::new(),
+                })
+            }
+        }
+
+        for fail_build in [false, true] {
+            let capture = DockerCapture {
+                commands: RefCell::new(Vec::new()),
+                containerfile: RefCell::new(String::new()),
+                fail_build,
+            };
+            let result = run(
+                "test:latest",
+                "example.test/base:latest",
+                &["example.test/addon:latest".to_owned()],
+                false,
+                &Backend::Cli(&ContainerCli::Docker, &capture),
+            );
+            assert_eq!(result.is_err(), fail_build);
+            let commands = capture.commands.borrow();
+            let tag = commands
+                .iter()
+                .find(|args| args[1..3] == ["image", "tag"])
+                .unwrap()
+                .last()
+                .unwrap();
+            assert!(
+                capture
+                    .containerfile
+                    .borrow()
+                    .contains(&format!("FROM {tag} AS system"))
+            );
+            assert_eq!(commands.last().unwrap(), &["docker", "image", "rm", tag]);
+        }
     }
 
     #[test]

@@ -49,8 +49,10 @@ impl Libc {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreparedBase {
     /// A local reference to the image selected in the runtime's store.
-    /// Podman and Docker use the immutable image ID. Apple's `container` keeps
-    /// the inspected name because a digest added to a tag may bypass its store.
+    /// Podman and Docker use the immutable image ID for preparation. Docker
+    /// addon builds give that ID a temporary tag for BuildKit's `FROM` lookup.
+    /// Apple's `container` keeps the inspected name because a digest added to
+    /// a tag may bypass its store.
     pub local_reference: String,
     pub platform: BasePlatform,
     /// Present only when the caller requested libc detection.
