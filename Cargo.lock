@@ -190,6 +190,8 @@ name = "container-image-builder"
 version = "0.13.0-next"
 dependencies = [
  "log",
+ "serde_json",
+ "tar",
  "tempfile",
  "which",
 ]
