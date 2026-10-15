@@ -61,16 +61,10 @@ struct Reference {
 impl Reference {
     fn parse(image: &str) -> Result<Self, RegistryError> {
         let (name, selector) = if let Some((name, digest)) = image.split_once('@') {
-            (name, digest)
+            (split_tag(name).0, digest)
         } else {
-            let last = image.rsplit('/').next().unwrap_or(image);
-            match last.rfind(':') {
-                Some(offset) => (
-                    &image[..image.len() - last.len() + offset],
-                    &last[offset + 1..],
-                ),
-                None => (image, "latest"),
-            }
+            let (name, tag) = split_tag(image);
+            (name, tag.unwrap_or("latest"))
         };
         let first = name.split('/').next().unwrap_or(name);
         let explicit_registry = first == "localhost"
@@ -130,6 +124,17 @@ impl Reference {
             .push(kind)
             .push(selector);
         Ok(url)
+    }
+}
+
+fn split_tag(image: &str) -> (&str, Option<&str>) {
+    let last = image.rsplit('/').next().unwrap_or(image);
+    match last.rfind(':') {
+        Some(offset) => (
+            &image[..image.len() - last.len() + offset],
+            Some(&last[offset + 1..]),
+        ),
+        None => (image, None),
     }
 }
 
@@ -413,6 +418,10 @@ mod tests {
         assert_eq!(local.repository, "team/addon");
         assert_eq!(local.selector, "sha256:abc");
         assert_eq!(local.scheme, "http");
+        let pinned = Reference::parse("localhost:5000/team/addon:v1@sha256:abc").unwrap();
+        assert_eq!(pinned.endpoint, "localhost:5000");
+        assert_eq!(pinned.repository, "team/addon");
+        assert_eq!(pinned.selector, "sha256:abc");
     }
 
     #[test]

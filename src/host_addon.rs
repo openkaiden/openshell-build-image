@@ -52,6 +52,101 @@ pub struct HostAddons {
     pub addons: Vec<ResolvedAddon>,
 }
 
+/// BuildKit does not resolve a bare Docker image ID in `FROM`. Give a tagged
+/// base a temporary name tied to its inspected ID, then remove that name after
+/// the build. A requested repository digest is already immutable and can be
+/// used directly; an untagged image ID has no other name to preserve when the
+/// temporary tag is removed.
+pub struct DockerBuildBase<'a> {
+    reference: String,
+    temporary: bool,
+    runner: &'a dyn Runner,
+    _reservation: Option<tempfile::TempDir>,
+}
+
+impl<'a> DockerBuildBase<'a> {
+    pub fn new(
+        requested: &str,
+        inspected_id: &str,
+        runner: &'a dyn Runner,
+    ) -> Result<Self, HostAddonError> {
+        if requested.contains('@') {
+            return Ok(Self {
+                reference: requested.to_owned(),
+                temporary: false,
+                runner,
+                _reservation: None,
+            });
+        }
+        let hex = requested.strip_prefix("sha256:").unwrap_or(requested);
+        if hex.len() == 64 && hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(error(
+                "Docker addon builds require a base image tag or repository digest, not a bare image ID",
+            ));
+        }
+        let reservation = tempfile::Builder::new()
+            .prefix("osbi-docker-base-")
+            .tempdir()
+            .map_err(|reason| error(format!("cannot reserve Docker base tag: {reason}")))?;
+        let suffix = reservation
+            .path()
+            .file_name()
+            .expect("temporary directory has a name")
+            .to_string_lossy()
+            .to_ascii_lowercase();
+        let reference = format!("osbi-build-base:{suffix}");
+        let mut tag = Command::new("docker");
+        tag.args(["image", "tag", inspected_id, &reference]);
+        let status = runner
+            .run(&mut tag)
+            .map_err(|reason| error(format!("Docker base tagging failed: {reason}")))?;
+        if !status.success() {
+            return Err(error(format!(
+                "Docker base tagging failed with exit code {:?}",
+                status.code()
+            )));
+        }
+        Ok(Self {
+            reference,
+            temporary: true,
+            runner,
+            _reservation: Some(reservation),
+        })
+    }
+
+    pub fn reference(&self) -> &str {
+        &self.reference
+    }
+
+    pub fn cleanup(&mut self) -> Result<(), HostAddonError> {
+        if !self.temporary {
+            return Ok(());
+        }
+        let mut remove = Command::new("docker");
+        remove.args(["image", "rm", &self.reference]);
+        let status = self
+            .runner
+            .run(&mut remove)
+            .map_err(|reason| error(format!("temporary Docker base removal failed: {reason}")))?;
+        if !status.success() {
+            return Err(error(format!(
+                "temporary Docker base removal failed with exit code {:?}",
+                status.code()
+            )));
+        }
+        self.temporary = false;
+        Ok(())
+    }
+}
+
+impl Drop for DockerBuildBase<'_> {
+    fn drop(&mut self) {
+        if let Err(reason) = self.cleanup() {
+            log::warn!("{reason}");
+        }
+    }
+}
+
 /// Read catalogs before preparing the base, so the base filesystem is probed
 /// once only if at least one catalog has multiple libc choices. All selected
 /// payloads are made available in the same runtime store before the build.
@@ -142,7 +237,13 @@ fn load_catalog(
         inspect.arg("manifest").arg("inspect");
         if *cli == ContainerCli::Podman && loopback_registry(image) {
             inspect.arg("--tls-verify=false");
-        } else if *cli == ContainerCli::Docker && loopback_registry(image) {
+        } else if *cli == ContainerCli::Docker
+            && loopback_registry(image)
+            && !ipv6_loopback_registry(image)
+        {
+            // Unlike `docker manifest inspect`, `docker pull` cannot enable
+            // insecure access per command. Do not accept HTTP-only IPv6 here
+            // and then fail after choosing its manifest.
             inspect.arg("--insecure");
         }
         inspect.arg(image);
@@ -160,6 +261,15 @@ fn load_catalog(
             // treating that manifest error as fatal.
             if known_single || inspect_local_image(image, cli, runner)?.status.success() {
                 return single_catalog_from_local(image, cli, runner);
+            }
+            if *cli == ContainerCli::Docker && ipv6_loopback_registry(image) {
+                return Err(addon_error(
+                    image,
+                    format!(
+                        "manifest inspection failed: {}; Docker addons from IPv6 loopback require a registry reachable over HTTPS",
+                        stderr.trim()
+                    ),
+                ));
             }
             return Err(addon_error(
                 image,
@@ -334,7 +444,12 @@ fn loopback_registry(image: &str) -> bool {
         || host.starts_with("localhost:")
         || host == "127.0.0.1"
         || host.starts_with("127.0.0.1:")
-        || host.starts_with("[::1]")
+        || ipv6_loopback_registry(image)
+}
+
+fn ipv6_loopback_registry(image: &str) -> bool {
+    let host = image.split('/').next().unwrap_or(image);
+    host == "[::1]" || host.starts_with("[::1]:")
 }
 
 fn normalized_repository(image: &str) -> String {
@@ -596,5 +711,70 @@ mod tests {
             normalized_repository("index.docker.io/library/alpine@sha256:abc"),
             "docker.io/library/alpine"
         );
+    }
+
+    #[test]
+    fn docker_rejects_http_only_ipv6_loopback_before_pull() {
+        let digest = format!("sha256:{}", "d".repeat(64));
+        let runner = FakeRunner::new(None, &digest, false);
+        let image = "[::1]:5000/addon:latest";
+
+        let reason = resolve(BASE, &[image.to_owned()], &ContainerCli::Docker, &runner)
+            .err()
+            .expect("manifest inspection must reject an unavailable IPv6 registry");
+        assert!(
+            reason
+                .to_string()
+                .contains("require a registry reachable over HTTPS")
+        );
+        let commands = runner.commands();
+        assert!(commands.contains(&vec![
+            "docker".into(),
+            "manifest".into(),
+            "inspect".into(),
+            image.into(),
+        ]));
+        assert!(!commands.iter().any(|args| args[1] == "pull"));
+        assert!(
+            !commands
+                .iter()
+                .any(|args| args.contains(&"--insecure".into()))
+        );
+    }
+
+    #[test]
+    fn docker_build_base_tags_the_inspected_image_and_removes_the_tag() {
+        let digest = format!("sha256:{}", "d".repeat(64));
+        let runner = FakeRunner::new(None, &digest, true);
+        let id = format!("sha256:{}", "a".repeat(64));
+
+        let mut base = DockerBuildBase::new(BASE, &id, &runner).unwrap();
+        let reference = base.reference().to_owned();
+        assert!(reference.starts_with("osbi-build-base:"));
+        assert_eq!(
+            runner.commands(),
+            vec![vec!["docker", "image", "tag", &id, &reference]]
+        );
+        base.cleanup().unwrap();
+        assert_eq!(
+            runner.commands().last().unwrap(),
+            &["docker", "image", "rm", &reference]
+        );
+    }
+
+    #[test]
+    fn docker_digest_base_needs_no_temporary_tag() {
+        let digest = format!("sha256:{}", "d".repeat(64));
+        let runner = FakeRunner::new(None, &digest, true);
+        let requested = format!("example.test/base@sha256:{}", "a".repeat(64));
+        let mut base = DockerBuildBase::new(&requested, &digest, &runner).unwrap();
+        assert_eq!(base.reference(), requested);
+        base.cleanup().unwrap();
+        assert!(runner.commands().is_empty());
+
+        let error = DockerBuildBase::new(&digest, &digest, &runner)
+            .err()
+            .expect("a bare ID cannot be used as a Docker base");
+        assert!(error.to_string().contains("bare image ID"));
     }
 }
