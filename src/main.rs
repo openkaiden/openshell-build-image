@@ -23,6 +23,7 @@ use std::path::{Path, PathBuf};
 use clap::Parser;
 use container_image_builder::{ContainerCli, ContainerRunner, Runner, build};
 use log::LevelFilter;
+use openshell_build_image::addon::AddonError;
 use vm_image_builder::{KrunRunner, VmConfig, VmRunner, build as vm_build};
 
 /// Selects how images are built.
@@ -103,6 +104,13 @@ struct Cli {
     )]
     from: String,
     #[arg(
+        long,
+        value_name = "IMAGE",
+        value_parser = containerfile::parse_image_reference,
+        help = "OCI addon image to copy into the built image (repeatable, in order)"
+    )]
+    addon: Vec<String>,
+    #[arg(
         short = 'v',
         action = clap::ArgAction::Count,
         help = "Increase log verbosity (-v info, -vv debug)"
@@ -180,7 +188,13 @@ fn main() {
     };
     let backend = backend_for(&selected);
 
-    if let Err(e) = run(&cli.tag, &cli.from, cli.copy_containerfile, &backend) {
+    if let Err(e) = run(
+        &cli.tag,
+        &cli.from,
+        &cli.addon,
+        cli.copy_containerfile,
+        &backend,
+    ) {
         eprintln!("Error: {e}");
         std::process::exit(1);
     }
@@ -351,9 +365,13 @@ fn build_summary(selected: &Selected) -> Option<String> {
 fn run(
     tag: &str,
     from: &str,
+    addons: &[String],
     copy_containerfile: bool,
     backend: &Backend,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    if !addons.is_empty() {
+        return Err(AddonError::NotImplemented.into());
+    }
     let context_dir = tempfile::Builder::new()
         .prefix("openshell-build-image")
         .tempdir()?;
@@ -524,12 +542,94 @@ mod tests {
     }
 
     #[test]
+    fn addon_accepts_zero_one_or_many_images_for_every_runtime() {
+        for runtime in ["podman", "docker", "container", "vm"] {
+            let first = "ghcr.io/example/first@sha256:0123456789abcdef";
+            let second = "ghcr.io/example/second:latest";
+            let base_args = [
+                "test",
+                "--runtime",
+                runtime,
+                "--from",
+                "alpine:3.24",
+                "test:latest",
+            ];
+            assert!(Cli::try_parse_from(base_args).unwrap().addon.is_empty());
+
+            let one = Cli::try_parse_from([
+                "test",
+                "--runtime",
+                runtime,
+                "--from",
+                "alpine:3.24",
+                "--addon",
+                first,
+                "test:latest",
+            ])
+            .unwrap();
+            assert_eq!(one.addon, [first]);
+
+            let many = Cli::try_parse_from([
+                "test",
+                "--runtime",
+                runtime,
+                "--from",
+                "alpine:3.24",
+                "--addon",
+                first,
+                "--addon",
+                second,
+                "--addon",
+                first,
+                "test:latest",
+            ])
+            .unwrap();
+            assert_eq!(many.addon, [first, second, first]);
+        }
+    }
+
+    #[test]
+    fn addon_rejects_empty_and_multiline_values() {
+        for image in ["", "addon AS injected", "addon\nRUN touch /injected"] {
+            let err = Cli::try_parse_from([
+                "test",
+                "--runtime",
+                "podman",
+                "--from",
+                "alpine:3.24",
+                "--addon",
+                image,
+                "test:latest",
+            ])
+            .err()
+            .expect("invalid --addon should fail");
+            assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation);
+        }
+    }
+
+    #[test]
+    fn addon_is_rejected_until_build_support_is_added() {
+        let result = run(
+            "test:latest",
+            "alpine:3.24",
+            &["ghcr.io/example/addon:latest".to_owned()],
+            false,
+            &Backend::Cli(&ContainerCli::Podman, &FakeRunner(0)),
+        );
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "--addon builds are not implemented yet"
+        );
+    }
+
+    #[test]
     fn run_passes_project_image_to_cli_backend() {
         let capture = ContainerfileCapture(std::sync::Mutex::new(String::new()));
         let image = "localhost:5000/project/tools:dev";
         run(
             "test:latest",
             image,
+            &[],
             false,
             &Backend::Cli(&ContainerCli::Podman, &capture),
         )
@@ -595,6 +695,7 @@ mod tests {
             run(
                 "test:latest",
                 "ghcr.io/example/project:dev",
+                &[],
                 enabled,
                 &Backend::Cli(&ContainerCli::Podman, &CopyChecker(enabled)),
             )
@@ -609,6 +710,7 @@ mod tests {
         let result = run(
             "test:latest",
             "ghcr.io/example/project:dev",
+            &[],
             false,
             &Backend::Cli(&ContainerCli::Podman, &FakeRunner(0)),
         );
@@ -620,6 +722,7 @@ mod tests {
         let result = run(
             "test:latest",
             "ghcr.io/example/project:dev",
+            &[],
             false,
             &Backend::Cli(&ContainerCli::Podman, &FakeRunner(1)),
         );
@@ -632,6 +735,7 @@ mod tests {
         run(
             "test:latest",
             "ghcr.io/example/project:dev",
+            &[],
             false,
             &Backend::Cli(&ContainerCli::Podman, &capture),
         )
@@ -838,6 +942,7 @@ mod tests {
         let result = run(
             "test:latest",
             "ghcr.io/example/project:dev",
+            &[],
             false,
             &Backend::Vm(&config, &runner, &output),
         );
@@ -856,6 +961,7 @@ mod tests {
         run(
             "test:latest",
             "ghcr.io/example/project:dev",
+            &[],
             true,
             &Backend::Vm(&config, &runner, &tmp.path().join("out.tar")),
         )
@@ -889,6 +995,7 @@ mod tests {
         let result = run(
             "test:latest",
             "ghcr.io/example/project:dev",
+            &[],
             false,
             &Backend::Vm(&config, &FailingVmRunner, &tmp.path().join("out.tar")),
         );
