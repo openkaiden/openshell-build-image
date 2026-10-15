@@ -14,7 +14,6 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-mod containerfile;
 mod vm_rootfs;
 
 use std::net::IpAddr;
@@ -24,6 +23,7 @@ use clap::Parser;
 use container_image_builder::{ContainerCli, ContainerRunner, Runner, build};
 use log::LevelFilter;
 use openshell_build_image::addon::AddonError;
+use openshell_build_image::containerfile;
 use vm_image_builder::{KrunRunner, VmConfig, VmRunner, build as vm_build};
 
 /// Selects how images are built.
@@ -375,7 +375,7 @@ fn run(
     let context_dir = tempfile::Builder::new()
         .prefix("openshell-build-image")
         .tempdir()?;
-    let output = containerfile::generate(from, copy_containerfile)?;
+    let output = containerfile::generate(from, copy_containerfile, &[])?;
     if copy_containerfile {
         std::fs::write(context_dir.path().join("build-containerfile"), &output)?;
     }
