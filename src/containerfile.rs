@@ -58,6 +58,7 @@ impl std::error::Error for ContainerfileError {}
 /// The build engine validates the registry, repository, tag, and digest syntax.
 pub fn parse_image_reference(image: &str) -> Result<String, ContainerfileError> {
     if image.is_empty()
+        || image.starts_with('-')
         || !image
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || b"._-/:@[]+".contains(&byte))
@@ -88,7 +89,7 @@ impl ResolvedAddon {
     }
 }
 
-fn pin_image_reference(image: &str, digest: &str) -> Result<String, ContainerfileError> {
+pub fn pin_image_reference(image: &str, digest: &str) -> Result<String, ContainerfileError> {
     parse_image_reference(image)?;
     let valid_digest = match digest.split_once(':') {
         Some(("sha256", hex)) => {
@@ -275,6 +276,7 @@ mod tests {
             "alpine#comment",
             "alpine\\",
             "alpine$OTHER",
+            "-addon",
         ] {
             let err = build_cf(image).unwrap_err();
             assert!(matches!(err, ContainerfileError::ImageReference { .. }));

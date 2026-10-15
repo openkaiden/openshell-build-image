@@ -39,6 +39,7 @@ container-image-builder = { path = "crates/container-image-builder" }
 dirs = "5"
 env_logger = "0.11"
 log = "0.4"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls-native-roots"] }
 serde_json = "1"
 sha2 = "0.10"
 tar = "0.4"

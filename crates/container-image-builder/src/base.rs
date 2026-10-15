@@ -48,7 +48,9 @@ impl Libc {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreparedBase {
-    /// An immutable reference to the image selected in the runtime's store.
+    /// A local reference to the image selected in the runtime's store.
+    /// Podman and Docker use the immutable image ID. Apple's `container` keeps
+    /// the inspected name because a digest added to a tag may bypass its store.
     pub local_reference: String,
     pub platform: BasePlatform,
     /// Present only when the caller requested libc detection.
@@ -130,7 +132,7 @@ impl From<std::io::Error> for PrepareError {
 /// reports the platform actually selected by that runtime. When `detect_libc`
 /// is true, inspect a stopped container's flattened filesystem without running
 /// any command inside the base image. The returned reference is suitable for
-/// `FROM` and remains tied to the inspected image even if its tag changes.
+/// `FROM` in the selected runtime's local store.
 pub fn prepare_base(
     image: &str,
     cli: &ContainerCli,
@@ -268,8 +270,7 @@ fn parse_apple_inspection(
         architecture: architecture.to_owned(),
         variant: optional_string(platform, "variant"),
     };
-    let repository = repository_name(requested_image)?;
-    Ok((format!("{repository}@{digest}"), platform))
+    Ok((requested_image.to_owned(), platform))
 }
 
 fn required_string<'a>(value: &'a Value, keys: &[&str]) -> Result<&'a str, PrepareError> {
@@ -304,23 +305,6 @@ fn validate_digest(digest: &str) -> Result<(), PrepareError> {
         Ok(())
     } else {
         Err(PrepareError::Inspection("invalid image digest".to_owned()))
-    }
-}
-
-fn repository_name(image: &str) -> Result<&str, PrepareError> {
-    let unpinned = image
-        .split_once('@')
-        .map_or(image, |(repository, _)| repository);
-    let last_component = unpinned.rsplit('/').next().unwrap_or(unpinned);
-    let repository = last_component.find(':').map_or(unpinned, |offset| {
-        &unpinned[..unpinned.len() - last_component.len() + offset]
-    });
-    if repository.is_empty() {
-        Err(PrepareError::Inspection(
-            "image has no repository name".to_owned(),
-        ))
-    } else {
-        Ok(repository)
     }
 }
 
@@ -624,7 +608,7 @@ mod tests {
     }
 
     #[test]
-    fn apple_uses_selected_variant_digest_and_local_export() {
+    fn apple_keeps_local_name_and_uses_local_export() {
         let digest = format!("sha256:{}", "d".repeat(64));
         let architecture = match std::env::consts::ARCH {
             "aarch64" => "arm64",
@@ -657,7 +641,7 @@ mod tests {
 
         assert_eq!(
             prepared.local_reference,
-            format!("registry.example:5000/base@{digest}")
+            "registry.example:5000/base:latest"
         );
         assert_eq!(prepared.platform.architecture, architecture);
         assert_eq!(prepared.libc, Some(Libc::Musl));

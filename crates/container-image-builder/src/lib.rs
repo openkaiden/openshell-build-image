@@ -315,7 +315,7 @@ pub fn build(
     runner: &dyn Runner,
     context_dir: &Path,
 ) -> Result<(), BuildError> {
-    build_with_pull_policy(containerfile, tag, cli, runner, context_dir, false)
+    build_with_pull_policy(containerfile, tag, cli, runner, context_dir, false, None)
 }
 
 /// Builds from image references that were already prepared in the runtime's
@@ -328,7 +328,29 @@ pub fn build_with_local_images(
     runner: &dyn Runner,
     context_dir: &Path,
 ) -> Result<(), BuildError> {
-    build_with_pull_policy(containerfile, tag, cli, runner, context_dir, true)
+    build_with_pull_policy(containerfile, tag, cli, runner, context_dir, true, None)
+}
+
+/// Build from already prepared images using the platform of the inspected
+/// base. This matters when the base is a non-native platform image already in
+/// the local store: the builder must choose addon payloads for that platform.
+pub fn build_with_local_images_on_platform(
+    containerfile: &str,
+    tag: &str,
+    cli: &ContainerCli,
+    runner: &dyn Runner,
+    context_dir: &Path,
+    platform: &base::BasePlatform,
+) -> Result<(), BuildError> {
+    build_with_pull_policy(
+        containerfile,
+        tag,
+        cli,
+        runner,
+        context_dir,
+        true,
+        Some(platform),
+    )
 }
 
 fn build_with_pull_policy(
@@ -338,6 +360,7 @@ fn build_with_pull_policy(
     runner: &dyn Runner,
     context_dir: &Path,
     local_only: bool,
+    platform: Option<&base::BasePlatform>,
 ) -> Result<(), BuildError> {
     let mut tmpfile = NamedTempFile::new()?;
     tmpfile.write_all(containerfile.as_bytes())?;
@@ -350,6 +373,16 @@ fn build_with_pull_policy(
             ContainerCli::Docker => cmd.arg("--pull=false"),
             ContainerCli::MacOsContainer => &mut cmd,
         };
+    }
+    if let Some(platform) = platform
+        && *cli != ContainerCli::MacOsContainer
+    {
+        let mut value = format!("{}/{}", platform.os, platform.architecture);
+        if let Some(variant) = &platform.variant {
+            value.push('/');
+            value.push_str(variant);
+        }
+        cmd.arg("--platform").arg(value);
     }
     cmd.arg("-f")
         .arg(tmpfile.path())
@@ -608,6 +641,29 @@ mod tests {
             assert_eq!(
                 args.iter().any(|arg| arg.starts_with("--pull")),
                 expected_flag.is_some()
+            );
+        }
+
+        let platform = base::BasePlatform {
+            os: "linux".to_owned(),
+            architecture: "amd64".to_owned(),
+            variant: None,
+        };
+        for cli in [ContainerCli::Podman, ContainerCli::Docker] {
+            let runner = CaptureRunner(RefCell::new(Vec::new()));
+            build_with_local_images_on_platform(
+                CONTAINERFILE,
+                TAG,
+                &cli,
+                &runner,
+                Path::new("."),
+                &platform,
+            )
+            .unwrap();
+            let args = runner.0.borrow();
+            assert!(
+                args.windows(2)
+                    .any(|pair| pair == ["--platform", "linux/amd64"])
             );
         }
     }

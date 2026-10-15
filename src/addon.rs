@@ -64,7 +64,7 @@ pub struct AddonVariant {
     pub digest: String,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AddonCatalog {
     variants: Vec<AddonVariant>,
 }
@@ -195,9 +195,16 @@ impl AddonCatalog {
         if !manifest.get("config").is_some_and(Value::is_object) {
             return Err(invalid("image manifest has no config descriptor"));
         }
-        validate_digest(manifest_digest)?;
         let config = parse_json(config_json)?;
         let platform = parse_platform(&config)?;
+        Self::single_image(platform, manifest_digest)
+    }
+
+    /// Build a catalog from a runtime's inspection of a single local image.
+    /// Podman's manifest command only accepts indexes, so its image inspection
+    /// supplies the platform and manifest digest for this case.
+    pub fn single_image(platform: Platform, manifest_digest: &str) -> Result<Self, AddonError> {
+        validate_digest(manifest_digest)?;
         Self::from_variants(vec![AddonVariant {
             platform,
             libc: None,
