@@ -14,13 +14,17 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+mod host_addon;
+mod registry;
 mod vm_rootfs;
 
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 
 use clap::Parser;
-use container_image_builder::{ContainerCli, ContainerRunner, Runner, build};
+use container_image_builder::{
+    ContainerCli, ContainerRunner, Runner, build, build_with_local_images_on_platform,
+};
 use log::LevelFilter;
 use openshell_build_image::addon::AddonError;
 use openshell_build_image::containerfile;
@@ -369,17 +373,40 @@ fn run(
     copy_containerfile: bool,
     backend: &Backend,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    if !addons.is_empty() {
+    if !addons.is_empty() && matches!(backend, Backend::Vm(..)) {
         return Err(AddonError::NotImplemented.into());
     }
+    let prepared = match backend {
+        Backend::Cli(cli, runner) if !addons.is_empty() => {
+            Some(host_addon::resolve(from, addons, cli, *runner)?)
+        }
+        _ => None,
+    };
     let context_dir = tempfile::Builder::new()
         .prefix("openshell-build-image")
         .tempdir()?;
-    let output = containerfile::generate(from, copy_containerfile, &[])?;
+    let base = prepared
+        .as_ref()
+        .map_or(from, |prepared| prepared.base.as_str());
+    let resolved = prepared
+        .as_ref()
+        .map_or(&[][..], |prepared| prepared.addons.as_slice());
+    let output = containerfile::generate(base, copy_containerfile, resolved)?;
     if copy_containerfile {
         std::fs::write(context_dir.path().join("build-containerfile"), &output)?;
     }
     match backend {
+        Backend::Cli(cli, runner) if prepared.is_some() => {
+            let prepared = prepared.as_ref().expect("prepared for addon build");
+            build_with_local_images_on_platform(
+                &output,
+                tag,
+                cli,
+                *runner,
+                context_dir.path(),
+                &prepared.platform,
+            )?
+        }
         Backend::Cli(cli, runner) => build(&output, tag, cli, *runner, context_dir.path())?,
         Backend::Vm(config, runner, vm_output) => {
             vm_build(&output, tag, config, *runner, context_dir.path(), vm_output)?
@@ -608,13 +635,23 @@ mod tests {
     }
 
     #[test]
-    fn addon_is_rejected_until_build_support_is_added() {
+    fn vm_addon_is_rejected_until_guest_support_is_added() {
+        let temp = tempfile::tempdir().unwrap();
+        let rootfs = fake_vm_rootfs(temp.path());
+        let config = VmConfig {
+            rootfs,
+            cpus: 2,
+            memory_mib: 1024,
+            nameservers: vec![],
+        };
+        let output = temp.path().join("output.tar");
+        let runner = FakeVmRunner::new();
         let result = run(
             "test:latest",
             "alpine:3.24",
             &["ghcr.io/example/addon:latest".to_owned()],
             false,
-            &Backend::Cli(&ContainerCli::Podman, &FakeRunner(0)),
+            &Backend::Vm(&config, &runner, &output),
         );
         assert_eq!(
             result.unwrap_err().to_string(),
