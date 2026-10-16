@@ -95,11 +95,13 @@ selected_ref() {
 }
 
 image_environment() {
-  "$runtime" image inspect "$1" | jq -r --arg architecture "$architecture" '
+  "$runtime" image inspect "$1" | jq -r --arg architecture "$architecture" \
+    --arg digest "${2:-}" '
     .[0] |
     if has("variants") then
       .variants[] |
       select(.platform.os == "linux" and .platform.architecture == $architecture) |
+      select($digest == "" or .digest == $digest) |
       .config.config.Env[]?
     else
       .Config.Env[]?
@@ -157,11 +159,27 @@ build_case() {
   image_environment "$E2E_BASE_IMAGE" | sort -u > "$artifacts/base-environment.txt"
   image_environment "$image" | sort -u > "$artifacts/$case_name.environment.txt"
   test -s "$artifacts/base-environment.txt"
-  local missing_base_environment
-  missing_base_environment=$(comm -23 "$artifacts/base-environment.txt" \
-    "$artifacts/$case_name.environment.txt")
+  local missing_base_environment expected_path actual_path addon_environment entry
+  missing_base_environment=$(comm -23 \
+    <(sed '/^PATH=/d' "$artifacts/base-environment.txt") \
+    <(sed '/^PATH=/d' "$artifacts/$case_name.environment.txt"))
   if [[ -n $missing_base_environment ]]; then
     echo "addon case $case_name lost base environment entries: $missing_base_environment" >&2
+    exit 1
+  fi
+  expected_path=$(sed -n 's/^PATH=//p' "$artifacts/base-environment.txt")
+  for fixture in "${fixtures[@]}"; do
+    selected=$(selected_ref "$fixture")
+    addon_environment=$(image_environment "$selected" "${selected##*@}")
+    while IFS= read -r entry; do
+      if [[ $entry == PATH=* ]]; then
+        expected_path+=":${entry#PATH=}"
+      fi
+    done <<< "$addon_environment"
+  done
+  actual_path=$(sed -n 's/^PATH=//p' "$artifacts/$case_name.environment.txt")
+  if [[ $actual_path != "$expected_path" ]]; then
+    echo "addon case $case_name PATH mismatch: expected $expected_path, got $actual_path" >&2
     exit 1
   fi
   local run_options=(--name "$check_name" --entrypoint /bin/sh)
