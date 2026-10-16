@@ -6,7 +6,7 @@ OpenShell ships a set of [pre-built sandbox images](https://github.com/NVIDIA/Op
 
 The tool builds on a project image that already has the tools your project needs. Use `--runtime` to select what drives the build: a container CLI on the host (`podman`, `docker`, or the macOS `container` CLI), or a microVM (`vm`) that needs no container runtime installed at all — see [Building in a VM](#building-in-a-vm---runtime-vm).
 
-Built-in agent installation and configuration have been removed. OCI addon support is tracked in [#178](https://github.com/openkaiden/openshell-build-image/issues/178).
+Built-in agent installation and configuration have been removed. OCI addons can be layered onto a project image with repeatable `--addon` flags.
 
 ## Quick start
 
@@ -38,6 +38,17 @@ The default filename comes from `<TAG>`, with `:` and `/` replaced by `-`. Overr
 ```sh
 tar -xf myimage-latest.tar -C /path/to/rootfs
 ```
+
+With `--addon`, the VM selects each addon inside the guest using the base image's platform and, when an addon index offers multiple libc variants, its libc. Addons are applied in flag order. The VM also writes `<tarball>.config.json` beside the tarball, containing the built image's OCI configuration, including addon `config.Env` values. Keep that file when importing the rootfs into an image store: a flattened tarball contains files only and cannot retain image environment settings by itself.
+
+```sh
+openshell-build-image --runtime vm --from myproject:dev \
+  --addon ghcr.io/example/tools:latest --addon ghcr.io/example/config:latest \
+  --vm-output myimage.tar myimage:latest
+# -> myimage.tar and myimage.tar.config.json
+```
+
+A custom `--vm-rootfs` built before addon support needs to be rebuilt to include the guest resolver and Skopeo.
 
 ### Requirements
 
@@ -114,6 +125,15 @@ openshell-build-image --runtime podman --from docker.io/library/alpine:3.24 alpi
 For a pinned image, use `--from registry.example.com/myproject@sha256:<digest>` with its full digest. The VM backend pulls the image into its own Buildah store, so it needs a registry reference accessible from the VM rather than an image present only in the host's store.
 
 Base-image configuration files, `--config`, `OPENSHELL_BUILD_IMAGE_CONFIG`, and `.kaiden/workspace.json` are not used by the image builder. Supply the required tools in the image passed to `--from`.
+
+## Applying OCI addons
+
+Each `--addon` copies the selected addon's files and applies its OCI `config.Env`
+values in command-line order. For environment variables other than `PATH`, a
+later value replaces an earlier one. `PATH` is special: an addon value such as
+`PATH=/usr/local/bin` is appended to the current image value, producing
+`ENV PATH="$PATH:/usr/local/bin"` in the build Containerfile. Multiple addon
+`PATH` values append in addon order, preserving the base image's existing paths.
 
 ## End-to-end tests with OpenShell
 
@@ -217,6 +237,7 @@ openshell-build-image --runtime <RUNTIME> --from <IMAGE> [OPTIONS] <TAG>
 | `<TAG>`                        | Tag for the built image (e.g. `myimage:latest`)                    |
 | `--runtime <RUNTIME>`          | Backend to build the image with (`podman`, `docker`, `container`, `vm` — see [Building in a VM](#building-in-a-vm---runtime-vm)) |
 | `--from <IMAGE>`               | Required project image to build from (name, tag, or digest) |
+| `--addon <IMAGE>`              | OCI addon to apply after the base image. Repeat in the desired order. |
 | `--copy-containerfile`         | Copy the build Containerfile to `$HOME/Containerfile` inside the image |
 | `--vm-rootfs <DIR>`            | Root filesystem the build VM boots from (`--runtime vm` only). Defaults to the one embedded in the binary. |
 | `--vm-output <FILE>`           | Path for the rootfs tarball produced by `--runtime vm`. Defaults to a name derived from `<TAG>` in the current directory. |

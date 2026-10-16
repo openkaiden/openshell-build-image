@@ -171,10 +171,12 @@ fn enter_vm(args: &Args, cpus: u8, memory_mib: u32) -> i32 {
             {
                 // The kernel's shebang handling supplies the script path as
                 // argv[0], so this array starts at what the script sees as $1.
-                let argv: [*const c_char; 4] = [
+                let request = args.request.as_ref().map_or(ptr::null(), |s| s.as_ptr());
+                let argv: [*const c_char; 5] = [
                     args.containerfile.as_ptr(),
                     args.tag.as_ptr(),
                     args.output_filename.as_ptr(),
+                    request,
                     ptr::null(),
                 ];
                 // A null in the middle terminates the list, so a build with no
@@ -214,6 +216,7 @@ struct Args {
     output_dir: CString,
     output_filename: CString,
     containerfile: CString,
+    request: Option<CString>,
     tag: CString,
     tag_root: CString,
     tag_context: CString,
@@ -233,6 +236,10 @@ impl Args {
             output_dir: cstring_path(&build.output_dir, "output directory")?,
             output_filename: cstring(&build.output_filename, "output filename")?,
             containerfile: cstring(&build.containerfile_vm_path(), "Containerfile path")?,
+            request: build
+                .request_vm_path()
+                .map(|path| cstring(&path, "build request path"))
+                .transpose()?,
             tag: cstring(&build.tag, "image tag")?,
             tag_root: cstring(TAG_ROOT, "root tag")?,
             tag_context: cstring(TAG_CONTEXT, "context tag")?,
