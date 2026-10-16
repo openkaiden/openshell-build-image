@@ -169,6 +169,8 @@ build_case() {
   "$runtime" run "${run_options[@]}" "$image" -c "$verify_script" addon-check \
     "$last_fixture" "$last_variant" "$copies" "${fixtures[*]}" "${pairs[@]}" \
     > "$artifacts/$case_name.inspect.log" 2>&1
+  # Keep the platforms-libc result as E2E_SOURCE for the later OpenShell sandbox.
+  # Apple container supplies a rootfs tarball; Podman and Docker supply an image tag.
   if [[ $keep_image == yes ]]; then
     if [[ $runtime == container ]]; then
       # Apple's OpenShell driver consumes a rootfs tar, and export needs a run first.
