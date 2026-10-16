@@ -281,11 +281,45 @@ fn load_catalog(
         let value: Value =
             serde_json::from_str(raw).map_err(|reason| addon_error(image, reason))?;
         if value.get("manifests").is_some() {
-            AddonCatalog::parse_index(raw).map_err(|reason| addon_error(image, reason))
+            let catalog =
+                AddonCatalog::parse_index(raw).map_err(|reason| addon_error(image, reason))?;
+            if *cli == ContainerCli::Docker && has_unannotated_duplicate_platform(&catalog) {
+                // Docker's manifest inspect can discard OCI descriptor annotations.
+                // Buildx's --raw output preserves them for libc selection.
+                let mut inspect_raw = Command::new("docker");
+                inspect_raw.args(["buildx", "imagetools", "inspect", "--raw", image]);
+                let output = runner.output(&mut inspect_raw).map_err(|reason| {
+                    addon_error(image, format!("raw manifest inspection failed: {reason}"))
+                })?;
+                if !output.status.success() {
+                    return Err(addon_error(
+                        image,
+                        format!(
+                            "raw manifest inspection failed: {}",
+                            String::from_utf8_lossy(&output.stderr).trim()
+                        ),
+                    ));
+                }
+                let raw = std::str::from_utf8(&output.stdout)
+                    .map_err(|reason| addon_error(image, reason))?;
+                AddonCatalog::parse_index(raw).map_err(|reason| addon_error(image, reason))
+            } else {
+                Ok(catalog)
+            }
         } else {
             single_catalog_from_local(image, cli, runner)
         }
     }
+}
+
+fn has_unannotated_duplicate_platform(catalog: &AddonCatalog) -> bool {
+    let variants = catalog.variants();
+    variants.iter().enumerate().any(|(index, variant)| {
+        variant.libc.is_none()
+            && variants[index + 1..]
+                .iter()
+                .any(|other| other.libc.is_none() && other.platform == variant.platform)
+    })
 }
 
 fn single_catalog_from_local(
@@ -491,6 +525,7 @@ mod tests {
 
     struct FakeRunner {
         manifest: Option<Value>,
+        raw_manifest: Option<Value>,
         selected_ref: String,
         selected_digest: String,
         selected_available: Cell<bool>,
@@ -502,6 +537,7 @@ mod tests {
         fn new(manifest: Option<Value>, digest: &str, selected_available: bool) -> Self {
             Self {
                 manifest,
+                raw_manifest: None,
                 selected_ref: containerfile::pin_image_reference(ADDON, digest).unwrap(),
                 selected_digest: digest.to_owned(),
                 selected_available: Cell::new(selected_available),
@@ -517,6 +553,12 @@ mod tests {
         fn output_for(&self, args: &[String]) -> Output {
             if args[1..3] == ["manifest", "inspect"] {
                 return match &self.manifest {
+                    Some(manifest) => output(manifest.clone(), 0),
+                    None => output(json!(null), 1),
+                };
+            }
+            if args[1..3] == ["buildx", "imagetools"] {
+                return match &self.raw_manifest {
                     Some(manifest) => output(manifest.clone(), 0),
                     None => output(json!(null), 1),
                 };
@@ -680,6 +722,40 @@ mod tests {
             !commands
                 .iter()
                 .any(|args| args.iter().any(|arg| arg.contains(&amd64)))
+        );
+    }
+
+    #[test]
+    fn docker_reads_raw_index_when_manifest_inspect_loses_libc_annotations() {
+        let glibc = format!("sha256:{}", "b".repeat(64));
+        let musl = format!("sha256:{}", "c".repeat(64));
+        let raw = index(&[("arm64", "glibc", &glibc), ("arm64", "musl", &musl)]);
+        let mut stripped = raw.clone();
+        for descriptor in stripped["manifests"].as_array_mut().unwrap() {
+            descriptor.as_object_mut().unwrap().remove("annotations");
+        }
+        let mut runner = FakeRunner::new(Some(stripped), &musl, true);
+        runner.raw_manifest = Some(raw);
+        runner.libc_marker = Some("lib/ld-musl-aarch64.so.1");
+
+        let prepared = resolve(BASE, &[ADDON.to_owned()], &ContainerCli::Docker, &runner).unwrap();
+        let file = containerfile::generate(&prepared.base, false, &prepared.addons).unwrap();
+        assert!(file.contains(&format!("COPY --from={} / /", runner.selected_ref)));
+        assert!(runner.commands().contains(&vec![
+            "docker".into(),
+            "buildx".into(),
+            "imagetools".into(),
+            "inspect".into(),
+            "--raw".into(),
+            ADDON.into(),
+        ]));
+        assert_eq!(
+            runner
+                .commands()
+                .iter()
+                .filter(|args| args[1] == "export")
+                .count(),
+            1
         );
     }
 

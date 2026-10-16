@@ -327,10 +327,20 @@ fn probe_libc(
     match cli {
         ContainerCli::Podman | ContainerCli::Docker => {
             create.arg("--pull=never");
+            create.args(["--name", &name, local_reference, "/bin/true"]);
         }
-        ContainerCli::MacOsContainer => {}
+        ContainerCli::MacOsContainer => {
+            // Apple creates rootfs.ext4 only when the container first starts.
+            // /dev/null is a device and cannot execute image-controlled code.
+            create.args([
+                "--entrypoint",
+                "/dev/null",
+                "--name",
+                &name,
+                local_reference,
+            ]);
+        }
     }
-    create.args(["--name", &name, local_reference, "/bin/true"]);
     if let Err(error) = runner
         .run(&mut create)
         .map_err(PrepareError::Io)
@@ -340,7 +350,12 @@ fn probe_libc(
         return Err(error);
     }
 
-    let result = export_and_scan(image, &name, temp.path(), cli, runner);
+    let result = if *cli == ContainerCli::MacOsContainer {
+        materialize_apple_rootfs(&name, runner)
+            .and_then(|()| export_and_scan(image, &name, temp.path(), cli, runner))
+    } else {
+        export_and_scan(image, &name, temp.path(), cli, runner)
+    };
     let cleanup = remove_probe_container(&name, cli, runner);
     match (result, cleanup) {
         (Ok(libc), Ok(())) => Ok(libc),
@@ -352,6 +367,21 @@ fn probe_libc(
     }
 }
 
+fn materialize_apple_rootfs(name: &str, runner: &dyn Runner) -> Result<(), PrepareError> {
+    let mut start = Command::new("container");
+    start.args(["start", name]);
+    let output = runner.output(&mut start)?;
+    if output.status.success() {
+        return Err(PrepareError::Inspection(
+            "Apple base probe unexpectedly started its non-executable /dev/null entrypoint"
+                .to_owned(),
+        ));
+    }
+    // A failed process start still materializes the rootfs. Export it after
+    // the VM stops; a separate export error will report a failed VM setup.
+    Ok(())
+}
+
 fn remove_probe_container(
     name: &str,
     cli: &ContainerCli,
@@ -359,7 +389,7 @@ fn remove_probe_container(
 ) -> Result<(), PrepareError> {
     let mut remove = Command::new(cli.binary());
     if *cli == ContainerCli::MacOsContainer {
-        remove.args(["delete", name]);
+        remove.args(["delete", "--force", name]);
     } else {
         remove.args(["rm", "--volumes", name]);
     }
@@ -459,6 +489,7 @@ mod tests {
         markers: Vec<&'static str>,
         fail_create: bool,
         fail_export: bool,
+        apple_start_succeeds: bool,
     }
 
     impl FakeRunner {
@@ -469,6 +500,7 @@ mod tests {
                 markers,
                 fail_create: false,
                 fail_export: false,
+                apple_start_succeeds: false,
             }
         }
 
@@ -500,7 +532,15 @@ mod tests {
         }
 
         fn output(&self, cmd: &mut Command) -> io::Result<Output> {
-            self.commands.borrow_mut().push(command_args(cmd));
+            let args = command_args(cmd);
+            self.commands.borrow_mut().push(args.clone());
+            if args[1] == "start" {
+                return Ok(Output {
+                    status: exit_with(i32::from(!self.apple_start_succeeds)),
+                    stdout: Vec::new(),
+                    stderr: b"/dev/null is not executable".to_vec(),
+                });
+            }
             self.inspections
                 .borrow_mut()
                 .pop_front()
@@ -667,9 +707,52 @@ mod tests {
             ]
         );
         assert_eq!(commands[2], commands[0]);
-        assert_eq!(&commands[3][..3], ["container", "create", "--name"]);
-        assert_eq!(&commands[4][..3], ["container", "export", "-o"]);
-        assert_eq!(commands[5], ["container", "delete", &commands[3][3]]);
+        assert_eq!(
+            &commands[3][..5],
+            ["container", "create", "--entrypoint", "/dev/null", "--name"]
+        );
+        assert_eq!(commands[4], ["container", "start", &commands[3][5]]);
+        assert_eq!(&commands[5][..3], ["container", "export", "-o"]);
+        assert_eq!(
+            commands[6],
+            ["container", "delete", "--force", &commands[3][5]]
+        );
+    }
+
+    #[test]
+    fn apple_probe_rejects_an_entrypoint_that_starts() {
+        let architecture = match std::env::consts::ARCH {
+            "aarch64" => "arm64",
+            "x86_64" => "amd64",
+            other => other,
+        };
+        let digest = format!("sha256:{}", "d".repeat(64));
+        let mut runner = FakeRunner::new(
+            vec![inspection(
+                serde_json::json!([{
+                    "variants": [{
+                        "digest": digest,
+                        "platform": {"os": "linux", "architecture": architecture}
+                    }]
+                }]),
+                0,
+            )],
+            vec![],
+        );
+        runner.apple_start_succeeds = true;
+
+        let error = prepare_base(
+            "example:latest",
+            &ContainerCli::MacOsContainer,
+            &runner,
+            true,
+        )
+        .expect_err("an executable probe entrypoint must be rejected");
+
+        assert!(matches!(error, PrepareError::Inspection(_)));
+        let commands = runner.commands();
+        assert_eq!(commands[2][..2], ["container", "start"]);
+        assert_eq!(commands[3][..2], ["container", "delete"]);
     }
 
     #[test]

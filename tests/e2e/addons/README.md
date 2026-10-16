@@ -17,6 +17,21 @@ resulting Podman images and indexes directly to
 or workflow changes on `main`; pull requests do not publish images. The
 workflow summary contains digest-pinned references for E2E tests.
 
+`refs.sh` pins the published references and selected child manifest digests
+from the successful main run at `f324fd76894a5d86942e7ef619b4dd89a0ee6091`.
+The main E2E workflow runs `e2e.sh` against these references with Podman,
+Docker, and Apple container. It runs `assert-image.sh` inside each result to
+check files, environment values, and selected `COPY` digests. Ubuntu and Alpine
+builds cover each fixture shape, including glibc and musl selection. The Ubuntu
+jobs also check addon order, repeated references, unsupported platforms, and
+bases without a detectable libc. Podman and Docker also build an image for the
+opposite CPU architecture without running it. Each build records its runtime commands so
+the tests can assert that libc detection exports the base exactly when needed.
+The resulting `platforms-libc` image is used for the OpenShell sandbox and
+network-policy test. `cleanup.sh` removes the built images and downloaded
+fixtures after the job. The VM builder still rejects `--addon`; Apple container
+builds use the OpenShell VM driver only to run the exported image as a sandbox.
+
 The canonical OCI index descriptor annotation key for libc selection is
 `ai.openkaiden.openshell-build-image.libc`. The `platforms-libc` index uses
 `glibc` and `musl` values; the `platforms` index has no libc annotations. Addon
