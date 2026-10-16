@@ -29,8 +29,10 @@ opposite CPU architecture without running it. Each build records its runtime com
 the tests can assert that libc detection exports the base exactly when needed.
 The resulting `platforms-libc` image is used for the OpenShell sandbox and
 network-policy test. `cleanup.sh` removes the built images and downloaded
-fixtures after the job. The VM builder still rejects `--addon`; Apple container
-builds use the OpenShell VM driver only to run the exported image as a sandbox.
+fixtures after the job. The VM runtime workflow tests its guest-side addon
+resolver with the same pinned `platforms-libc` index on Fedora and Alpine.
+Apple container builds use the OpenShell VM driver to run the exported image
+as a sandbox.
 
 The canonical OCI index descriptor annotation key for libc selection is
 `ai.openkaiden.openshell-build-image.libc`. The `platforms-libc` index uses

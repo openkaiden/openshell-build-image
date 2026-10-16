@@ -581,8 +581,8 @@ pub fn build(
     )
 }
 
-/// Build with a versioned request staged in the shared context. The existing
-/// Containerfile remains the build input until guest addon resolution is ready.
+/// Build with a versioned request staged in the shared context. The guest
+/// resolver uses it to generate a Containerfile when addons are present.
 pub fn build_with_request(
     containerfile: &str,
     request: &VmRequest<'_>,

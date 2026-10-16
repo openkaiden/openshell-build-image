@@ -89,7 +89,21 @@ mount -t tmpfs tmpfs /var/tmp
 # Alpine's default soft limit (1024) is too low; raise it to the hard limit.
 ulimit -n "$(ulimit -Hn)"
 
-buildah bud --isolation chroot --network host -f "$CFILE" -t "$TAG" /build/context
+if [ -n "$REQUEST_FILE" ]; then
+    if [ ! -x /usr/local/bin/vm-guest-helper ]; then
+        printf '[vm-build] missing executable guest resolver\n' >&2
+        exit 1
+    fi
+    /usr/local/bin/vm-guest-helper prepare "$REQUEST_FILE" "$CFILE"
+fi
+
+# The resolver has already pulled the base and selected manifest digests into
+# this Buildah store. A build must use those exact local images.
+if [ -f /build/context/.vm-addons-enabled ]; then
+    buildah bud --pull=never --isolation chroot --network host -f "$CFILE" -t "$TAG" /build/context
+else
+    buildah bud --isolation chroot --network host -f "$CFILE" -t "$TAG" /build/context
+fi
 
 # The VM has no access to the host's image store, so the built image is
 # flattened into a tarball handed back through the output share.
@@ -98,3 +112,6 @@ mnt=$(buildah mount "$ctr")
 tar -cf /build/output/"$OUTPUT_FILE" -C "$mnt" .
 buildah umount "$ctr"
 buildah rm "$ctr"
+if [ -f /build/context/.vm-addons-enabled ]; then
+    /usr/local/bin/vm-guest-helper config "$TAG" "/build/output/$OUTPUT_FILE.config.json"
+fi

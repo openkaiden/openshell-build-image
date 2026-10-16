@@ -15,8 +15,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 [workspace]
-members = [".", "crates/addon-rules", "crates/container-image-builder", "crates/vm-image-builder"]
-default-members = [".", "crates/addon-rules", "crates/container-image-builder", "crates/vm-image-builder"]
+members = [".", "crates/addon-rules", "crates/container-image-builder", "crates/vm-image-builder", "crates/vm-guest-helper"]
+default-members = [".", "crates/addon-rules", "crates/container-image-builder", "crates/vm-image-builder", "crates/vm-guest-helper"]
 
 [workspace.package]
 version = "0.13.0-next"

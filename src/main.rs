@@ -415,9 +415,10 @@ fn backend_for<'a>(
 fn build_summary(result: &BuildResult) -> Option<String> {
     match result {
         BuildResult::Image { .. } => None,
-        BuildResult::VmArtifact { rootfs_tar, .. } => {
-            Some(format!("Wrote {}", rootfs_tar.display()))
-        }
+        BuildResult::VmArtifact { rootfs_tar, config } => Some(match config {
+            Some(config) => format!("Wrote {} and {}", rootfs_tar.display(), config.display()),
+            None => format!("Wrote {}", rootfs_tar.display()),
+        }),
     }
 }
 
@@ -473,7 +474,9 @@ mod tests {
 
     // Stands in for the microVM: records the build it was handed so tests can
     // assert on it without libkrun, which is unavailable in CI.
-    struct FakeVmRunner(std::sync::Mutex<Option<(vm_image_builder::VmBuild, String)>>);
+    struct FakeVmRunner(
+        std::sync::Mutex<Option<(vm_image_builder::VmBuild, String, serde_json::Value)>>,
+    );
 
     impl FakeVmRunner {
         fn new() -> Self {
@@ -498,6 +501,15 @@ mod tests {
                 .expect("VM runner was not called")
                 .1
         }
+
+        fn request(&self) -> serde_json::Value {
+            self.0
+                .lock()
+                .unwrap()
+                .clone()
+                .expect("VM runner was not called")
+                .2
+        }
     }
 
     impl VmRunner for FakeVmRunner {
@@ -513,7 +525,6 @@ mod tests {
                     .unwrap();
             assert_eq!(request["version"], 1);
             assert_eq!(request["tag"], build.tag);
-            assert_eq!(request["addons"], serde_json::json!([]));
             assert_eq!(
                 build.request_vm_path().as_deref(),
                 Some("/build/context/build-request.json")
@@ -524,7 +535,7 @@ mod tests {
                     containerfile
                 );
             }
-            *self.0.lock().unwrap() = Some((build.clone(), containerfile));
+            *self.0.lock().unwrap() = Some((build.clone(), containerfile, request));
             Ok(())
         }
     }
@@ -536,12 +547,15 @@ mod tests {
         std::fs::create_dir_all(&bin).unwrap();
         let helper = bin.join("vm-build");
         std::fs::write(&helper, "#!/bin/sh\n").unwrap();
+        let resolver = bin.join("vm-guest-helper");
+        std::fs::write(&resolver, "#!/bin/sh\n").unwrap();
         // `check_rootfs` requires the execute bit, as libkrun exec's the
         // helper. Only Unix has one, and only there does the check run.
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755)).unwrap();
+            std::fs::set_permissions(&resolver, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
         rootfs
     }
@@ -667,7 +681,7 @@ mod tests {
     }
 
     #[test]
-    fn vm_addon_is_rejected_until_guest_support_is_added() {
+    fn vm_addon_request_reaches_the_guest_in_order() {
         let temp = tempfile::tempdir().unwrap();
         let rootfs = fake_vm_rootfs(temp.path());
         let config = VmConfig {
@@ -681,14 +695,53 @@ mod tests {
         let result = run(
             "test:latest",
             "alpine:3.24",
-            &["ghcr.io/example/addon:latest".to_owned()],
+            &[
+                "ghcr.io/example/addon:latest".to_owned(),
+                "ghcr.io/example/second:latest".to_owned(),
+                "ghcr.io/example/addon:latest".to_owned(),
+            ],
             false,
             &Backend::Vm(&config, &runner, &output),
         );
         assert_eq!(
-            result.unwrap_err().to_string(),
-            "--addon builds are not implemented yet"
+            result.unwrap(),
+            BuildResult::VmArtifact {
+                rootfs_tar: output.clone(),
+                config: Some(PathBuf::from(format!("{}.config.json", output.display()))),
+            }
         );
+        let build = runner.captured();
+        assert_eq!(
+            build.request_vm_path().as_deref(),
+            Some("/build/context/build-request.json")
+        );
+        assert_eq!(
+            runner.request()["addons"],
+            serde_json::json!([
+                "ghcr.io/example/addon:latest",
+                "ghcr.io/example/second:latest",
+                "ghcr.io/example/addon:latest"
+            ])
+        );
+    }
+
+    #[test]
+    fn vm_addon_requires_a_guest_resolver_in_the_rootfs() {
+        let temp = tempfile::tempdir().unwrap();
+        let rootfs = fake_vm_rootfs(temp.path());
+        std::fs::remove_file(rootfs.join("usr/local/bin/vm-guest-helper")).unwrap();
+        let config = VmConfig::new(&rootfs);
+        let output = temp.path().join("output.tar");
+        let runner = FakeVmRunner::new();
+        let error = run(
+            "test:latest",
+            "alpine:3.24",
+            &["ghcr.io/example/addon:latest".to_owned()],
+            false,
+            &Backend::Vm(&config, &runner, &output),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("rebuild it to use --addon"));
     }
 
     #[test]
