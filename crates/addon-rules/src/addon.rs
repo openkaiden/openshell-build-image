@@ -81,7 +81,6 @@ pub enum AddonError {
         platform: Platform,
         libc: Option<String>,
     },
-    NotImplemented,
 }
 
 impl std::fmt::Display for AddonError {
@@ -107,9 +106,6 @@ impl std::fmt::Display for AddonError {
                     write!(f, " with libc {libc}")?;
                 }
                 Ok(())
-            }
-            Self::NotImplemented => {
-                write!(f, "--addon builds are not implemented yet")
             }
         }
     }

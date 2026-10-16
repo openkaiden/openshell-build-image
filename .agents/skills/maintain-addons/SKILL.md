@@ -1,6 +1,6 @@
 ---
 name: maintain-addons
-description: Modify OCI addon selection and builds in host runtimes, including platform and libc matching and backend tests
+description: Modify OCI addon selection and builds in host and VM runtimes, including platform and libc matching and backend tests
 ---
 
 # Maintain OCI addons
@@ -9,7 +9,7 @@ Use this guide when changing `--addon`, OCI manifest selection, libc probing, or
 
 ## Description
 
-The CLI accepts zero or more `--addon <IMAGE>` flags. Each addon is applied in argument order after the project base image. A later addon may replace an earlier file or `ENV` value. Builds without addons follow the existing path. Host runtimes support addons; `--runtime vm` currently rejects them until selection can run inside the guest's Buildah store. The VM currently produces a flattened rootfs tarball, which cannot carry OCI `ENV` metadata; resolve that output limitation before claiming full VM addon support.
+The CLI accepts zero or more `--addon <IMAGE>` flags. Each addon is applied in argument order after the project base image. A later addon may replace an earlier file or `ENV` value. Builds without addons follow the existing path. The VM selects addons inside the guest's Buildah store and writes an OCI config sidecar beside its flattened rootfs tarball, preserving environment metadata that a tarball cannot carry.
 
 ## Instructions
 
@@ -18,7 +18,8 @@ The CLI accepts zero or more `--addon <IMAGE>` flags. Each addon is applied in a
 - `src/main.rs`: clap stores addon references in `Cli.addon: Vec<String>` and passes the complete request to the selected backend. `src/backend.rs` implements the four complete-build backends and the shared host pipeline. Preserve the full list, including duplicates and order.
 - `crates/addon-rules/src/addon.rs`: `AddonCatalog` parses OCI indexes and single manifests. `select()` matches the base platform and, when needed, libc. The descriptor annotation key is `ai.openkaiden.openshell-build-image.libc`.
 - `crates/addon-rules/src/containerfile.rs`: `ResolvedAddon` pins each selected manifest digest, reads `config.Env`, and emits its `COPY --from=<repository>@<digest> / /` and `ENV` instructions in order. Validate references and escape environment values before writing instructions.
-- `crates/addon-rules/src/libc.rs`: shared marker rules for host tar inspection and future guest mounted-filesystem inspection.
+- `crates/addon-rules/src/libc.rs`: shared marker rules for host tar inspection and guest mounted-filesystem inspection.
+- `crates/vm-guest-helper/src/main.rs`: guest resolution using Skopeo for OCI metadata and Buildah for local images. The versioned request comes from `vm-image-builder`; `vm-build` runs the helper and exports the config sidecar.
 
 ### Step 2 — preserve selection rules
 
@@ -36,12 +37,14 @@ The CLI accepts zero or more `--addon <IMAGE>` flags. Each addon is applied in a
 - Docker addon builds temporarily tag the inspected base image ID because BuildKit cannot use a bare local ID in `FROM`. Remove the tag after the build, including on build failure. For Docker, HTTP-only IPv6 loopback addon registries are rejected during manifest inspection; use HTTPS for `[::1]`.
 - Apple's `container image inspect` does not supply the raw index descriptor annotations needed for libc selection. `src/registry.rs` retrieves OCI metadata from the registry and uses Apple's configured registry credentials when challenged. Keep registry responses bounded and verify their digests. Apple's prepared base keeps its original local reference because adding `@digest` to a tag may trigger another pull.
 - `crates/container-image-builder/src/lib.rs::build_with_local_images_on_platform()` builds from prepared images. Podman and Docker disable pulls and receive the inspected base platform, including for a non-native base. Apple's build uses its local store without a `--pull` flag.
+- The VM guest loads catalogs before pulling its base, probes a temporary mounted Buildah container only when multiple libc values require it, pulls selected addon digests, and builds with `--pull=never`. Keep Skopeo's `containers-storage:` lookups and Buildah on the guest's VFS store. Buildah prefixes locally tagged results with `localhost/`; the config sidecar lookup must account for this.
 
 ### Step 4 — update the right tests
 
 - Add selection cases to `crates/addon-rules/src/addon.rs` tests, including single image, one libc across platforms, multiple libc values, unannotated indexes, and ambiguous or missing matches.
 - Add Containerfile ordering, digest, and `ENV` escaping cases to `crates/addon-rules/src/containerfile.rs` tests.
 - Add host command capture cases to `src/host_addon.rs` and base probe cases to `crates/container-image-builder/src/base.rs`. Keep Docker and Apple tests distinct from Podman tests. Test registry HTTP behavior in `src/registry.rs`.
+- Add guest selection, order, probe, and error cases to `crates/vm-guest-helper/src/main.rs`. Build the guest rootfs with `make build-vm-rootfs` and use the VM runtime workflow to test live selection and sidecar metadata.
 - Run `cargo fmt --check && cargo clippy -- -D warnings && cargo test` and `cargo test -p container-image-builder`. These unit tests use fake runners; they do not prove that Docker or Apple's `container` can complete a live build.
 - For live addon E2E, build local fixtures in three OCI shapes: `single`, `platforms` (amd64 and arm64, one libc), and `platforms-libc` (both platforms, glibc and musl). Give every variant a distinct file marker and environment value. Cover no addon, each shape on musl and glibc bases, multiple addon orders, repeated references, a non-native base, unsupported platform, and undetectable libc. Assert the selected marker and digest, absence of other variants, environment order, and probe count. Add Docker and Apple jobs only where those runtimes are available, and label their results separately from mocked tests.
 

@@ -23,11 +23,11 @@ cargo fmt --check && cargo clippy -- -D warnings && cargo test
 
 ## OCI addons
 
-`--addon <IMAGE>` is repeatable and ordered. Host builds (`podman`, `docker`, and Apple's `container`) select an addon manifest for the prepared base image's OS and architecture, and use its libc only when the addon index has multiple libc choices. Keep base inspection, optional libc detection, addon pulls, and the final build in the same runtime's image store. `--runtime vm` currently rejects addons; its future resolver must run inside the guest where Buildah uses the base image.
+`--addon <IMAGE>` is repeatable and ordered. All runtimes select an addon manifest for the prepared base image's OS and architecture, and use its libc only when the addon index has multiple libc choices. Keep base inspection, optional libc detection, addon pulls, and the final build in the same runtime's image store. The VM resolver runs inside the guest where Buildah uses the base image.
 
-Use [`maintain-addons`](.agents/skills/maintain-addons/SKILL.md) for the selection rules, file map, backend differences, and test coverage. The checked-in E2E workflow does not yet exercise addon fixtures or live Docker/Apple addon builds.
+Use [`maintain-addons`](.agents/skills/maintain-addons/SKILL.md) for the selection rules, file map, backend differences, and test coverage. Host addon fixtures run in the E2E workflow; the VM runtime workflow checks guest selection on musl and glibc bases.
 
-`src/backend.rs` defines the complete-build trait and the four runtime implementations. Pure catalog, Containerfile, and libc marker rules live in `crates/addon-rules` so a future VM guest helper can use them without depending on the host binary. VM builds stage a versioned request in the shared context, but still reject `--addon` until guest selection and environment metadata support are complete.
+`src/backend.rs` defines the complete-build trait and the four runtime implementations. Pure catalog, Containerfile, and libc marker rules live in `crates/addon-rules`; `crates/vm-guest-helper` uses them inside the VM. VM builds stage a versioned request in the shared context. With addons, the VM writes a flattened rootfs tarball and an adjacent `<tarball>.config.json` sidecar that carries OCI environment metadata.
 
 ## GitHub Actions
 

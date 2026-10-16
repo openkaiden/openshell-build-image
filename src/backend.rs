@@ -19,7 +19,6 @@
 use std::path::{Path, PathBuf};
 
 use container_image_builder::{ContainerCli, Runner, build, build_with_local_images_on_platform};
-use openshell_build_image::addon::AddonError;
 use openshell_build_image::containerfile::{self, ResolvedAddon};
 use vm_image_builder::{VmConfig, VmRequest, VmRunner, build_with_request as vm_build};
 
@@ -43,7 +42,7 @@ pub enum BuildResult {
     },
     VmArtifact {
         rootfs_tar: PathBuf,
-        // Reserved for the environment sidecar in the VM addon stage.
+        // The selected addons' OCI environment is saved beside the tarball.
         config: Option<PathBuf>,
     },
 }
@@ -206,7 +205,28 @@ impl ImageBackend for VmBackend<'_> {
 
     fn build(&self, request: &BuildRequest<'_>) -> Result<BuildResult, BuildError> {
         if !request.addons.is_empty() {
-            return Err(AddonError::NotImplemented.into());
+            let helper = self.config.rootfs.join("usr/local/bin/vm-guest-helper");
+            if !helper.is_file() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    format!(
+                        "VM rootfs {} does not contain vm-guest-helper; rebuild it to use --addon",
+                        self.config.rootfs.display()
+                    ),
+                )
+                .into());
+            }
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                if std::fs::metadata(&helper)?.permissions().mode() & 0o111 == 0 {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        format!("VM guest helper {} is not executable", helper.display()),
+                    )
+                    .into());
+                }
+            }
         }
         let context = tempfile::Builder::new()
             .prefix("openshell-build-image")
@@ -227,7 +247,11 @@ impl ImageBackend for VmBackend<'_> {
         )?;
         Ok(BuildResult::VmArtifact {
             rootfs_tar: self.output.to_path_buf(),
-            config: None,
+            config: (!request.addons.is_empty()).then(|| {
+                let mut name = self.output.as_os_str().to_os_string();
+                name.push(".config.json");
+                PathBuf::from(name)
+            }),
         })
     }
 }
