@@ -31,6 +31,10 @@ The resulting `platforms-libc` image is used for the OpenShell sandbox and
 network-policy test. `cleanup.sh` removes the built images and downloaded
 fixtures after the job. The VM runtime workflow tests its guest-side addon
 resolver with the same pinned `platforms-libc` index on Fedora and Alpine.
+The OpenShell VM E2E job builds with that index on Ubuntu and Alpine, then
+checks that OpenShell starts a sandbox from the exported rootfs and enforces
+its network policy. Addon selection and metadata are checked by the VM
+runtime workflow rather than repeated in the OpenShell E2E job.
 Apple container builds use the OpenShell VM driver to run the exported image
 as a sandbox.
 
