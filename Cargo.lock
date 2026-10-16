@@ -3,6 +3,13 @@
 version = 4
 
 [[package]]
+name = "addon-rules"
+version = "0.13.0-next"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
 name = "aho-corasick"
 version = "1.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -236,6 +243,7 @@ checksum = "1d07550c9036bf2ae0c684c4297d503f838287c83c53686d05370d0e139ae570"
 name = "container-image-builder"
 version = "0.13.0-next"
 dependencies = [
+ "addon-rules",
  "log",
  "serde_json",
  "tar",
@@ -950,6 +958,7 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 name = "openshell-build-image"
 version = "0.13.0-next"
 dependencies = [
+ "addon-rules",
  "clap",
  "container-image-builder",
  "ctor",
@@ -1741,6 +1750,7 @@ dependencies = [
  "krun-sys",
  "libc",
  "log",
+ "serde_json",
 ]
 
 [[package]]

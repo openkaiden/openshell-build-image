@@ -23,27 +23,14 @@ use std::process::{Command, ExitStatus, Output};
 use serde_json::Value;
 
 use crate::{ContainerCli, Runner};
+pub use addon_rules::libc::Libc;
+use addon_rules::libc::libc_marker;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BasePlatform {
     pub os: String,
     pub architecture: String,
     pub variant: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Libc {
-    Glibc,
-    Musl,
-}
-
-impl Libc {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Glibc => "glibc",
-            Self::Musl => "musl",
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -447,29 +434,6 @@ fn detect_libc_in_archive(image: &str, archive: &Path) -> Result<Libc, PrepareEr
             glibc_found,
             musl_found,
         }),
-    }
-}
-
-fn libc_marker(path: &Path) -> Option<Libc> {
-    let components: Vec<_> = path
-        .components()
-        .filter_map(|component| component.as_os_str().to_str())
-        .filter(|component| *component != ".")
-        .collect();
-    let in_library_dir = matches!(components.first(), Some(&"lib" | &"lib64"))
-        || matches!(components.as_slice(), ["usr", "lib" | "lib64", ..]);
-    if !in_library_dir {
-        return None;
-    }
-    let name = components.last()?;
-    if *name == "libc.so.6" || (name.starts_with("ld-linux") && name.contains(".so.")) {
-        Some(Libc::Glibc)
-    } else if (name.starts_with("ld-musl-") || name.starts_with("libc.musl-"))
-        && name.contains(".so.1")
-    {
-        Some(Libc::Musl)
-    } else {
-        None
     }
 }
 

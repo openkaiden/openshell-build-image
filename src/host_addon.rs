@@ -531,6 +531,7 @@ mod tests {
         selected_available: Cell<bool>,
         libc_marker: Option<&'static str>,
         commands: RefCell<Vec<Vec<String>>>,
+        built_containerfile: RefCell<Option<String>>,
     }
 
     impl FakeRunner {
@@ -543,6 +544,7 @@ mod tests {
                 selected_available: Cell::new(selected_available),
                 libc_marker: None,
                 commands: RefCell::new(Vec::new()),
+                built_containerfile: RefCell::new(None),
             }
         }
 
@@ -596,6 +598,9 @@ mod tests {
             let args = command_args(cmd);
             if args[1] == "pull" {
                 self.selected_available.set(true);
+            } else if args[1] == "build" {
+                let path = &args[args.iter().position(|part| part == "-f").unwrap() + 1];
+                *self.built_containerfile.borrow_mut() = Some(std::fs::read_to_string(path)?);
             } else if args[1] == "export" {
                 let mut archive = tar::Builder::new(File::create(Path::new(&args[3]))?);
                 if let Some(path) = self.libc_marker {
@@ -697,6 +702,51 @@ mod tests {
             1
         );
         assert_eq!(commands.iter().filter(|args| args[1] == "pull").count(), 0);
+    }
+
+    #[test]
+    fn podman_backend_keeps_repeated_addons_across_trait_boundary() {
+        use crate::backend::{BuildRequest, BuildResult, ImageBackend, PodmanBackend};
+
+        let glibc = format!("sha256:{}", "b".repeat(64));
+        let musl = format!("sha256:{}", "c".repeat(64));
+        let mut runner = FakeRunner::new(
+            Some(index(&[
+                ("arm64", "glibc", &glibc),
+                ("arm64", "musl", &musl),
+            ])),
+            &musl,
+            true,
+        );
+        runner.libc_marker = Some("lib/ld-musl-aarch64.so.1");
+        let addons = vec![ADDON.to_owned(), ADDON.to_owned()];
+        let backend = PodmanBackend { runner: &runner };
+        let result = backend
+            .build(&BuildRequest {
+                from: BASE,
+                addons: &addons,
+                tag: "test:latest",
+                copy_containerfile: false,
+            })
+            .unwrap();
+        assert_eq!(
+            result,
+            BuildResult::Image {
+                tag: "test:latest".to_owned()
+            }
+        );
+        let file = runner.built_containerfile.borrow();
+        let file = file.as_deref().expect("build should read Containerfile");
+        let copy = format!("COPY --from={} / /", runner.selected_ref);
+        assert_eq!(file.matches(&copy).count(), 2);
+        assert_eq!(file.matches("ENV ADDON_TEST=\"selected\"").count(), 2);
+        assert!(file.find(&copy).unwrap() < file.rfind(&copy).unwrap());
+        let commands = runner.commands();
+        assert_eq!(
+            commands.iter().filter(|args| args[1] == "create").count(),
+            1
+        );
+        assert_eq!(commands.iter().filter(|args| args[1] == "build").count(), 1);
     }
 
     #[test]

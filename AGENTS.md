@@ -27,6 +27,8 @@ cargo fmt --check && cargo clippy -- -D warnings && cargo test
 
 Use [`maintain-addons`](.agents/skills/maintain-addons/SKILL.md) for the selection rules, file map, backend differences, and test coverage. The checked-in E2E workflow does not yet exercise addon fixtures or live Docker/Apple addon builds.
 
+`src/backend.rs` defines the complete-build trait and the four runtime implementations. Pure catalog, Containerfile, and libc marker rules live in `crates/addon-rules` so a future VM guest helper can use them without depending on the host binary. VM builds stage a versioned request in the shared context, but still reject `--addon` until guest selection and environment metadata support are complete.
+
 ## GitHub Actions
 
 Pin actions by commit SHA with a version comment, using the actual latest release — not just the latest major tag:
