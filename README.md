@@ -126,6 +126,15 @@ For a pinned image, use `--from registry.example.com/myproject@sha256:<digest>` 
 
 Base-image configuration files, `--config`, `OPENSHELL_BUILD_IMAGE_CONFIG`, and `.kaiden/workspace.json` are not used by the image builder. Supply the required tools in the image passed to `--from`.
 
+## Applying OCI addons
+
+Each `--addon` copies the selected addon's files and applies its OCI `config.Env`
+values in command-line order. For environment variables other than `PATH`, a
+later value replaces an earlier one. `PATH` is special: an addon value such as
+`PATH=/usr/local/bin` is appended to the current image value, producing
+`ENV PATH="$PATH:/usr/local/bin"` in the build Containerfile. Multiple addon
+`PATH` values append in addon order, preserving the base image's existing paths.
+
 ## End-to-end tests with OpenShell
 
 The `OpenShell E2E` workflow builds an image with this tool, starts an isolated

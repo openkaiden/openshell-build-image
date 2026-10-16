@@ -174,9 +174,13 @@ fn validate_environment(name: &str, value: &str) -> Result<(), ContainerfileErro
     Ok(())
 }
 
-fn escape_environment_value(value: &str) -> String {
+fn escape_environment_value(value: &str, append_to_path: bool) -> String {
     let mut escaped = String::with_capacity(value.len() + 2);
     escaped.push('"');
+    if append_to_path {
+        // Expand the previous stage's PATH, but keep dollars in the addon value literal.
+        escaped.push_str("$PATH:");
+    }
     for character in value.chars() {
         if matches!(character, '\\' | '"' | '$') {
             escaped.push('\\');
@@ -209,7 +213,7 @@ fn final_stage(copy_containerfile: bool, addons: &[ResolvedAddon]) -> String {
             output.push_str("ENV ");
             output.push_str(name);
             output.push('=');
-            output.push_str(&escape_environment_value(value));
+            output.push_str(&escape_environment_value(value, name == "PATH"));
             output.push('\n');
         }
         output.push('\n');
@@ -292,7 +296,7 @@ mod tests {
             &[
                 "SHARED=first",
                 "FIRST=yes",
-                "PATH=/opt/first bin:$PATH",
+                "PATH=/usr/local/bin",
                 r#"QUOTE=he said "hello"\backslash"#,
                 "EMPTY=",
                 "TOKEN=a=b=c",
@@ -301,7 +305,7 @@ mod tests {
         let second = resolved_addon(
             &format!("registry.example/second@sha256:{}", "c".repeat(64)),
             'b',
-            &["SHARED=second", "SECOND=yes"],
+            &["SHARED=second", "SECOND=yes", "PATH=/opt/second bin:$PATH"],
         );
         let content = generate("alpine:3.24", true, &[first, second]).unwrap();
         let first_copy = format!(
@@ -319,7 +323,11 @@ mod tests {
         assert!(content.find("ENV SHARED=\"first\"").unwrap() < second_position);
         assert!(second_position < content.find("ENV SHARED=\"second\"").unwrap());
         assert!(second_position < content.find("COPY build-containerfile").unwrap());
-        assert!(content.contains(r#"ENV PATH="/opt/first bin:\$PATH""#));
+        let first_path = r#"ENV PATH="$PATH:/usr/local/bin""#;
+        let second_path = r#"ENV PATH="$PATH:/opt/second bin:\$PATH""#;
+        assert!(content.contains(first_path));
+        assert!(content.contains(second_path));
+        assert!(content.find(first_path).unwrap() < content.find(second_path).unwrap());
         assert!(content.contains(r#"ENV QUOTE="he said \"hello\"\\backslash""#));
         assert!(content.contains("ENV EMPTY=\"\""));
         assert!(content.contains("ENV TOKEN=\"a=b=c\""));
