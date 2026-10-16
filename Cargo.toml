@@ -15,7 +15,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 [workspace]
-members = [".", "crates/container-image-builder", "crates/vm-image-builder"]
+members = [".", "crates/addon-rules", "crates/container-image-builder", "crates/vm-image-builder"]
+default-members = [".", "crates/addon-rules", "crates/container-image-builder", "crates/vm-image-builder"]
 
 [workspace.package]
 version = "0.13.0-next"
@@ -34,6 +35,7 @@ default = []
 vm = ["vm-image-builder/krun"]
 
 [dependencies]
+addon-rules = { path = "crates/addon-rules" }
 clap = { version = "4", features = ["derive"] }
 container-image-builder = { path = "crates/container-image-builder" }
 dirs = "5"

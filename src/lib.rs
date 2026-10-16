@@ -14,5 +14,6 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-pub mod addon;
-pub mod containerfile;
+// Preserve the public module paths while the pure rules move to a crate that
+// can also be linked into the Linux VM guest helper.
+pub use addon_rules::{addon, containerfile};

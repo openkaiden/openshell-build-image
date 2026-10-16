@@ -17,15 +17,17 @@
 #
 # Entry point of the build microVM, exec'd by the vm-image-builder crate.
 #
-# Usage: vm-build <containerfile-vm-path> <tag> <output-filename>
+# Usage: vm-build <containerfile-vm-path> <tag> <output-filename> [request-vm-path]
 #   containerfile-vm-path  path to the Containerfile as seen inside the VM
 #   tag                    image tag for buildah
 #   output-filename        name of the rootfs tarball written to /build/output/
+#   request-vm-path        versioned JSON request in the shared context, when supplied
 set -e
 
 CFILE="$1"
 TAG="$2"
 OUTPUT_FILE="$3"
+REQUEST_FILE="${4:-}"
 
 on_exit() {
     rc=$?
@@ -42,6 +44,10 @@ trap on_exit EXIT
 mkdir -p /build/context /build/output
 mount -t virtiofs openshell-context /build/context
 mount -t virtiofs openshell-output  /build/output
+if [ -n "$REQUEST_FILE" ] && [ ! -f "$REQUEST_FILE" ]; then
+    printf '[vm-build] missing build request: %s\n' "$REQUEST_FILE" >&2
+    exit 1
+fi
 
 # virtiofs on APFS does not fully support xattrs: lgetxattr on dangling symlinks
 # returns ENOENT, which breaks buildah's VFS layer copy. Mount tmpfs over the
