@@ -45,11 +45,9 @@ pub fn libc_marker(path: &Path) -> Option<Libc> {
         return None;
     }
     let name = components.last()?;
-    if *name == "libc.so.6" || (name.starts_with("ld-linux") && name.contains(".so.")) {
+    if *name == "ld-linux.so.2" || (name.starts_with("ld-linux-") && name.contains(".so.")) {
         Some(Libc::Glibc)
-    } else if (name.starts_with("ld-musl-") || name.starts_with("libc.musl-"))
-        && name.contains(".so.1")
-    {
+    } else if name.starts_with("ld-musl-") && name.ends_with(".so.1") {
         Some(Libc::Musl)
     } else {
         None
@@ -62,7 +60,14 @@ mod tests {
 
     #[test]
     fn markers_are_scoped_to_image_library_directories() {
-        assert_eq!(libc_marker(Path::new("lib/libc.so.6")), Some(Libc::Glibc));
+        assert_eq!(
+            libc_marker(Path::new("lib/ld-linux.so.2")),
+            Some(Libc::Glibc)
+        );
+        assert_eq!(
+            libc_marker(Path::new("lib64/ld-linux-x86-64.so.2")),
+            Some(Libc::Glibc)
+        );
         assert_eq!(
             libc_marker(Path::new("usr/lib/aarch64-linux-gnu/ld-linux-aarch64.so.1")),
             Some(Libc::Glibc)
@@ -71,6 +76,12 @@ mod tests {
             libc_marker(Path::new("lib/ld-musl-aarch64.so.1")),
             Some(Libc::Musl)
         );
-        assert_eq!(libc_marker(Path::new("tmp/libc.so.6")), None);
+        assert_eq!(libc_marker(Path::new("lib/ld-musl-aarch64.so.10")), None);
+        assert_eq!(libc_marker(Path::new("lib/libc.so.5")), None);
+        assert_eq!(libc_marker(Path::new("lib/libc.so.6")), None);
+        assert_eq!(libc_marker(Path::new("lib/libc.musl-x86_64.so.1")), None);
+        assert_eq!(libc_marker(Path::new("lib/ld-linux.so.1")), None);
+        assert_eq!(libc_marker(Path::new("lib/libc.so.7")), None);
+        assert_eq!(libc_marker(Path::new("tmp/ld-linux.so.2")), None);
     }
 }

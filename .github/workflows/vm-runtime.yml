@@ -205,7 +205,7 @@ jobs:
         run: |
           for variant in fedora alpine; do
             case "$variant" in
-              fedora) image=registry.fedoraproject.org/fedora:latest ;;
+              fedora) image=registry.fedoraproject.org/fedora:44 ;;
               alpine) image=docker.io/library/alpine:3.24 ;;
             esac
             make run-vm FROM="$image" TAG="openshell-vm-test-$variant:integration" ARGS="-v --copy-containerfile"
@@ -221,7 +221,7 @@ jobs:
             containerfile=$(grep -E '(^|/)Containerfile$' "$RUNNER_TEMP/vm-rootfs-contents.txt")
             test -n "$containerfile"
             case "$variant" in
-              fedora) image=registry.fedoraproject.org/fedora:latest ;;
+              fedora) image=registry.fedoraproject.org/fedora:44 ;;
               alpine) image=docker.io/library/alpine:3.24 ;;
             esac
             tar -xOf "$archive" "$containerfile" | grep -Fx "FROM $image AS system"
@@ -233,7 +233,7 @@ jobs:
           for variant in fedora alpine; do
             case "$variant" in
               fedora)
-                image=registry.fedoraproject.org/fedora:latest
+                image=registry.fedoraproject.org/fedora:44
                 libc=glibc
                 selected=$ADDON_PLATFORMS_LIBC_ARM64_GLIBC ;;
               alpine)
