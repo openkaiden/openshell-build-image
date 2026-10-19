@@ -568,7 +568,7 @@ mod tests {
         let id = "b".repeat(64);
         let runner = FakeRunner::new(
             vec![inspection(Value::Null, 1), local_inspection(&id, "amd64")],
-            vec!["usr/lib/x86_64-linux-gnu/libc.so.6"],
+            vec!["usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2"],
         );
 
         let prepared = prepare_base("example:latest", &ContainerCli::Podman, &runner, true)
@@ -724,7 +724,7 @@ mod tests {
         let id = "e".repeat(64);
         let runner = FakeRunner::new(
             vec![local_inspection(&id, "amd64")],
-            vec!["lib/libc.so.6", "lib/ld-musl-x86_64.so.1"],
+            vec!["lib/ld-linux-x86-64.so.2", "lib/ld-musl-x86_64.so.1"],
         );
 
         let error = prepare_base("example:latest", &ContainerCli::Podman, &runner, true)
