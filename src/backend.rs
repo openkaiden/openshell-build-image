@@ -130,7 +130,10 @@ fn stage_containerfile(
 ) -> Result<String, BuildError> {
     let output = containerfile::generate(base, request.copy_containerfile, addons)?;
     if request.copy_containerfile {
-        std::fs::write(context.join("build-containerfile"), &output)?;
+        // The build may use an inspected image ID or a temporary Docker tag.
+        // The copy in the result records the base reference the user supplied.
+        let copied = containerfile::generate(request.from, true, addons)?;
+        std::fs::write(context.join("build-containerfile"), copied)?;
     }
     Ok(output)
 }
@@ -253,5 +256,50 @@ impl ImageBackend for VmBackend<'_> {
                 PathBuf::from(name)
             }),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use openshell_build_image::addon::{AddonVariant, Platform};
+
+    #[test]
+    fn copied_addon_containerfile_uses_requested_base() {
+        let context = tempfile::tempdir().unwrap();
+        let requested_addons = ["ghcr.io/example/tools:latest".to_owned()];
+        let request = BuildRequest {
+            from: "example.test/base:latest",
+            addons: &requested_addons,
+            tag: "example.test/result:latest",
+            copy_containerfile: true,
+        };
+        let selected = ResolvedAddon::from_variant(
+            &requested_addons[0],
+            &AddonVariant {
+                platform: Platform::new("linux", "amd64", None),
+                libc: None,
+                digest: format!("sha256:{}", "a".repeat(64)),
+            },
+            r#"{"config":{}}"#,
+        )
+        .unwrap();
+
+        for prepared_base in ["b".repeat(64), "osbi-build-base:temporary".to_owned()] {
+            let build = stage_containerfile(
+                &request,
+                context.path(),
+                &prepared_base,
+                std::slice::from_ref(&selected),
+            )
+            .unwrap();
+            let copied =
+                std::fs::read_to_string(context.path().join("build-containerfile")).unwrap();
+
+            assert!(build.contains(&format!("FROM {prepared_base} AS system\n")));
+            assert!(copied.contains("FROM example.test/base:latest AS system\n"));
+            assert!(!copied.contains(&format!("FROM {prepared_base} AS system\n")));
+            assert!(copied.contains("COPY --from=ghcr.io/example/tools@sha256:"));
+        }
     }
 }
