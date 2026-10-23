@@ -426,10 +426,12 @@ fn detect_libc_in_archive(image: &str, archive: &Path) -> Result<Libc, PrepareEr
             None => {}
         }
     }
+    // Prefer musl when both loaders are present. This is a selection policy
+    // for mixed-libc images, not a claim about which libc came first.
     match (glibc_found, musl_found) {
         (true, false) => Ok(Libc::Glibc),
-        (false, true) => Ok(Libc::Musl),
-        _ => Err(PrepareError::LibcUnclear {
+        (_, true) => Ok(Libc::Musl),
+        (false, false) => Err(PrepareError::LibcUnclear {
             image: image.to_owned(),
             glibc_found,
             musl_found,
@@ -720,26 +722,17 @@ mod tests {
     }
 
     #[test]
-    fn ambiguous_libc_still_removes_probe_container() {
+    fn mixed_libc_loaders_select_musl_and_remove_probe_container() {
         let id = "e".repeat(64);
         let runner = FakeRunner::new(
             vec![local_inspection(&id, "amd64")],
             vec!["lib/ld-linux-x86-64.so.2", "lib/ld-musl-x86_64.so.1"],
         );
 
-        let error = prepare_base("example:latest", &ContainerCli::Podman, &runner, true)
-            .expect_err("mixed libc markers are ambiguous");
-
-        assert!(matches!(
-            error,
-            PrepareError::LibcUnclear {
-                glibc_found: true,
-                musl_found: true,
-                ..
-            }
-        ));
-        let commands = runner.commands();
-        assert_eq!(commands.last().unwrap()[..2], ["podman", "rm"]);
+        let prepared = prepare_base("example:latest", &ContainerCli::Podman, &runner, true)
+            .expect("mixed libc loaders select musl");
+        assert_eq!(prepared.libc, Some(Libc::Musl));
+        assert_eq!(runner.commands().last().unwrap()[..2], ["podman", "rm"]);
     }
 
     #[test]

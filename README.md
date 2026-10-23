@@ -135,6 +135,13 @@ later value replaces an earlier one. `PATH` is special: an addon value such as
 `ENV PATH="$PATH:/usr/local/bin"` in the build Containerfile. Multiple addon
 `PATH` values append in addon order, preserving the base image's existing paths.
 
+When a multi-libc addon needs base detection, a base with both glibc and musl
+loaders selects the musl variant. This preference does not establish which
+libc was installed first or guarantee that a compatibility shim supports every
+binary. A base with neither loader is rejected. Host runtimes export the base
+filesystem to temporary storage for that probe, so allow space for its
+uncompressed rootfs.
+
 ## End-to-end tests with OpenShell
 
 The `OpenShell E2E` workflow builds an image with this tool, starts an isolated

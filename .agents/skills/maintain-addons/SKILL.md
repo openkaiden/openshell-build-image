@@ -25,7 +25,7 @@ The CLI accepts zero or more `--addon <IMAGE>` flags. Each addon is applied in a
 
 - A single image requires a matching OS and architecture; it does not require a libc probe.
 - An index with multiple platforms and one libc value, or no libc annotations, selects by platform without a libc probe.
-- If an index has multiple libc values, determine the base libc once and select the descriptor matching OS, architecture, and libc. Reject no match, duplicate match, and partial libc annotation rather than guessing.
+- If an index has multiple libc values, probe the base once and select the descriptor matching OS, architecture, and libc. Prefer musl when both loader types are present; this is a selection policy, not proof of which libc came first. Reject a base with neither loader, no variant match, duplicate match, and partial libc annotation.
 - Ignore non-image and attestation descriptors. Use the selected descriptor's digest rather than the index tag, since glibc and musl descriptors may share a platform.
 
 ### Step 3 — keep host operations in one image store
@@ -46,7 +46,7 @@ The CLI accepts zero or more `--addon <IMAGE>` flags. Each addon is applied in a
 - Add host command capture cases to `src/host_addon.rs` and base probe cases to `crates/container-image-builder/src/base.rs`. Keep Docker and Apple tests distinct from Podman tests. Test registry HTTP behavior in `src/registry.rs`.
 - Add guest selection, order, probe, and error cases to `crates/vm-guest-helper/src/main.rs`. Build the guest rootfs with `make build-vm-rootfs` and use the VM runtime workflow to test live selection and sidecar metadata.
 - Run `cargo fmt --check && cargo clippy -- -D warnings && cargo test` and `cargo test -p container-image-builder`. These unit tests use fake runners; they do not prove that Docker or Apple's `container` can complete a live build.
-- For live addon E2E, build local fixtures in three OCI shapes: `single`, `platforms` (amd64 and arm64, one libc), and `platforms-libc` (both platforms, glibc and musl). Give every variant a distinct file marker and environment value. Cover no addon, each shape on musl and glibc bases, multiple addon orders, repeated references, a non-native base, unsupported platform, and undetectable libc. Assert the selected marker and digest, absence of other variants, environment order, and probe count. Add Docker and Apple jobs only where those runtimes are available, and label their results separately from mocked tests.
+- For live addon E2E, build local fixtures in three OCI shapes: `single`, `platforms` (amd64 and arm64, one libc), and `platforms-libc` (both platforms, glibc and musl). Give every variant a distinct file marker and environment value. Cover no addon, each shape on musl and glibc bases, Alpine with `gcompat` and both loaders, multiple addon orders, repeated references, a non-native base, unsupported platform, and undetectable libc. Assert the selected marker and digest, absence of other variants, environment order, and probe count. Add Docker and Apple jobs only where those runtimes are available, and label their results separately from mocked tests.
 
 ## Checklist
 

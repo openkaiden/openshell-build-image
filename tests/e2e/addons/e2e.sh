@@ -131,8 +131,8 @@ remove_check() {
 trap remove_check EXIT
 
 build_case() {
-  local case_name=$1 expected_probes=$2 keep_image=$3
-  shift 3
+  local case_name=$1 expected_probes=$2 keep_image=$3 from=$4
+  shift 4
   local fixtures=("$@") image="$E2E_IMAGE-addon-$case_name"
   local options=() pairs=() copies='' fixture variant selected last_fixture='' last_variant=''
   printf '%s\n' "$image" >> "$E2E_DIR/addon-built-images"
@@ -153,10 +153,10 @@ build_case() {
   (cd "$E2E_DIR"; PATH="$E2E_DIR/addon-runtime:$PATH" \
     OSBI_E2E_REAL_RUNTIME="$real_runtime" OSBI_E2E_COMMAND_LOG="$command_log" \
     "$GITHUB_WORKSPACE/target/debug/openshell-build-image" \
-      --runtime "$runtime" --from "$E2E_BASE_IMAGE" --copy-containerfile \
+      --runtime "$runtime" --from "$from" --copy-containerfile \
       "${options[@]}" -v "$image") > "$artifacts/$case_name.build.log" 2>&1
   assert_probes "$command_log" "$expected_probes"
-  image_environment "$E2E_BASE_IMAGE" | sort -u > "$artifacts/base-environment.txt"
+  image_environment "$from" | sort -u > "$artifacts/base-environment.txt"
   image_environment "$image" | sort -u > "$artifacts/$case_name.environment.txt"
   test -s "$artifacts/base-environment.txt"
   local missing_base_environment expected_path actual_path addon_environment entry
@@ -204,6 +204,33 @@ build_case() {
   fi
   remove_check
   if [[ $keep_image != yes ]]; then "$runtime" image rm --force "$image"; fi
+}
+
+build_gcompat_case() {
+  local base="$E2E_IMAGE-addon-gcompat-base"
+  local context="$E2E_DIR/addon-gcompat-context"
+  printf '%s\n' "$base" >> "$E2E_DIR/addon-built-images"
+  mkdir -p "$context"
+  printf 'FROM %s\nUSER root\nRUN apk add --no-cache gcompat\n' "$E2E_BASE_IMAGE" \
+    > "$context/Containerfile"
+  echo "building Alpine gcompat base ($runtime)"
+  "$runtime" build -f "$context/Containerfile" -t "$base" "$context" \
+    > "$artifacts/gcompat-base.build.log" 2>&1
+
+  local run_options=(--name "$check_name" --entrypoint /bin/sh)
+  if [[ $runtime != container ]]; then run_options+=(--network none); fi
+  "$runtime" run "${run_options[@]}" "$base" -c '
+    test -e "/lib/ld-musl-$(uname -m).so.1" || exit 1
+    for directory in /lib /lib64 /usr/lib /usr/lib64; do
+      test -d "$directory" || continue
+      if find "$directory" -name "ld-linux*.so.*" -print | grep -q .; then
+        exit 0
+      fi
+    done
+    exit 1
+  ' > "$artifacts/gcompat-base.inspect.log" 2>&1
+  remove_check
+  build_case gcompat 1 no "$base" platforms-libc
 }
 
 expect_failure() {
@@ -270,16 +297,18 @@ build_non_native() {
   "$runtime" image rm --force "$image"
 }
 
-build_case single 0 no single
-build_case platforms 0 no platforms
-build_case platforms-libc 1 yes platforms-libc
+build_case single 0 no "$E2E_BASE_IMAGE" single
+build_case platforms 0 no "$E2E_BASE_IMAGE" platforms
+build_case platforms-libc 1 yes "$E2E_BASE_IMAGE" platforms-libc
 if [[ $base_kind == ubuntu ]]; then
-  build_case forward 1 no single platforms platforms-libc
-  build_case reverse 1 no platforms-libc single
-  build_case repeat 1 no platforms-libc platforms-libc
+  build_case forward 1 no "$E2E_BASE_IMAGE" single platforms platforms-libc
+  build_case reverse 1 no "$E2E_BASE_IMAGE" platforms-libc single
+  build_case repeat 1 no "$E2E_BASE_IMAGE" platforms-libc platforms-libc
   if [[ $runtime != container ]]; then build_non_native; fi
   expect_failure unsupported "$E2E_BASE_IMAGE" "$opposite_ref" \
     'no addon variant matches' 0
   expect_failure missing-libc "$single_ref" "$ADDON_PLATFORMS_LIBC" \
     'cannot determine whether base image' 1
+else
+  build_gcompat_case
 fi
