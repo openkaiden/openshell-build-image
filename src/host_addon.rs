@@ -255,11 +255,36 @@ fn load_catalog(
             let known_single = *cli == ContainerCli::Podman
                 && (stderr.contains("Treating single images as manifest lists is not implemented")
                     || stderr.contains("not a manifest list"));
-            // `manifest inspect` can consult a registry even when a single
-            // image is already in the local store. A locally built addon may
-            // have no registry at all, so inspect the local image before
-            // treating that manifest error as fatal.
-            if known_single || inspect_local_image(image, cli, runner)?.status.success() {
+            // A failed registry request does not prove the local tag is a
+            // single image: it may point at one variant of a pulled index.
+            // Podman also assigns repository digests to locally built single
+            // images. A different digest for this repository is evidence of
+            // a pulled index, which must not be used without its catalog.
+            let local = inspect_local_image(image, cli, runner)?;
+            let local_single = if local.status.success() {
+                let data = inspected_image(&local.stdout, image)?;
+                let digest = data.get("Digest").and_then(Value::as_str);
+                let wanted = normalized_repository(image);
+                match data.get("RepoDigests") {
+                    None | Some(Value::Null) => true,
+                    Some(Value::Array(digests)) => digests.iter().all(|entry| {
+                        entry
+                            .as_str()
+                            .and_then(|reference| reference.split_once('@'))
+                            .is_some_and(|(repository, reference_digest)| {
+                                normalized_repository(repository) != wanted
+                                    || Some(reference_digest) == digest
+                            })
+                    }),
+                    _ => false,
+                }
+            } else {
+                false
+            };
+            if known_single || (*cli == ContainerCli::Podman && local_single) {
+                log::warn!(
+                    "manifest inspection failed for {image:?}; using its local single-image digest"
+                );
                 return single_catalog_from_local(image, cli, runner);
             }
             if *cli == ContainerCli::Docker && ipv6_loopback_registry(image) {
@@ -525,10 +550,13 @@ mod tests {
 
     struct FakeRunner {
         manifest: Option<Value>,
+        manifest_error: &'static str,
         raw_manifest: Option<Value>,
         selected_ref: String,
         selected_digest: String,
         selected_available: Cell<bool>,
+        local_repo_digests: bool,
+        local_index_digest: Option<String>,
         libc_marker: Option<&'static str>,
         commands: RefCell<Vec<Vec<String>>>,
         built_containerfile: RefCell<Option<String>>,
@@ -538,10 +566,13 @@ mod tests {
         fn new(manifest: Option<Value>, digest: &str, selected_available: bool) -> Self {
             Self {
                 manifest,
+                manifest_error: "registry unavailable",
                 raw_manifest: None,
                 selected_ref: containerfile::pin_image_reference(ADDON, digest).unwrap(),
                 selected_digest: digest.to_owned(),
                 selected_available: Cell::new(selected_available),
+                local_repo_digests: true,
+                local_index_digest: None,
                 libc_marker: None,
                 commands: RefCell::new(Vec::new()),
                 built_containerfile: RefCell::new(None),
@@ -556,7 +587,11 @@ mod tests {
             if args[1..3] == ["manifest", "inspect"] {
                 return match &self.manifest {
                     Some(manifest) => output(manifest.clone(), 0),
-                    None => output(json!(null), 1),
+                    None => {
+                        let mut failed = output(json!(null), 1);
+                        failed.stderr = self.manifest_error.as_bytes().to_vec();
+                        failed
+                    }
                 };
             }
             if args[1..3] == ["buildx", "imagetools"] {
@@ -575,19 +610,27 @@ mod tests {
                 && (args[3] == self.selected_ref || args[3] == ADDON)
                 && self.selected_available.get()
             {
-                return output(
-                    json!([{
-                        "Digest": self.selected_digest,
-                        "Os": "linux",
-                        "Architecture": "arm64",
-                        "Config": {"Env": ["ADDON_TEST=selected"]},
-                        "RepoDigests": [
-                            format!("example.test/other@sha256:{}", "e".repeat(64)),
-                            self.selected_ref
-                        ]
-                    }]),
-                    0,
-                );
+                let mut inspected = json!([{
+                    "Digest": self.selected_digest,
+                    "Os": "linux",
+                    "Architecture": "arm64",
+                    "Config": {"Env": ["ADDON_TEST=selected"]},
+                    "RepoDigests": [
+                        format!("example.test/other@sha256:{}", "e".repeat(64)),
+                        self.selected_ref
+                    ]
+                }]);
+                if !self.local_repo_digests && args[3] == ADDON {
+                    inspected[0]["RepoDigests"] = json!([]);
+                } else if args[3] == ADDON {
+                    if let Some(digest) = &self.local_index_digest {
+                        inspected[0]["RepoDigests"]
+                            .as_array_mut()
+                            .unwrap()
+                            .push(json!(format!("example.test/addon@{digest}")));
+                    }
+                }
+                return output(inspected, 0);
             }
             output(json!(null), 1)
         }
@@ -810,9 +853,10 @@ mod tests {
     }
 
     #[test]
-    fn podman_uses_local_single_image_when_manifest_registry_is_unavailable() {
+    fn podman_uses_local_single_image_when_manifest_reports_single_image() {
         let digest = format!("sha256:{}", "d".repeat(64));
-        let runner = FakeRunner::new(None, &digest, true);
+        let mut runner = FakeRunner::new(None, &digest, true);
+        runner.manifest_error = "not a manifest list";
 
         let prepared = resolve(BASE, &[ADDON.to_owned()], &ContainerCli::Podman, &runner).unwrap();
         let file = containerfile::generate(&prepared.base, false, &prepared.addons).unwrap();
@@ -821,9 +865,45 @@ mod tests {
     }
 
     #[test]
-    fn docker_single_image_uses_digest_for_requested_repository() {
+    fn podman_uses_local_only_image_when_registry_is_unavailable() {
+        let digest = format!("sha256:{}", "d".repeat(64));
+        let mut runner = FakeRunner::new(None, &digest, true);
+        runner.local_repo_digests = false;
+
+        let prepared = resolve(BASE, &[ADDON.to_owned()], &ContainerCli::Podman, &runner).unwrap();
+        let file = containerfile::generate(&prepared.base, false, &prepared.addons).unwrap();
+        assert!(file.contains(&format!("COPY --from={} / /", runner.selected_ref)));
+        assert!(!runner.commands().iter().any(|args| args[1] == "pull"));
+    }
+
+    #[test]
+    fn podman_uses_local_single_digest_when_registry_is_unavailable() {
         let digest = format!("sha256:{}", "d".repeat(64));
         let runner = FakeRunner::new(None, &digest, true);
+
+        let prepared = resolve(BASE, &[ADDON.to_owned()], &ContainerCli::Podman, &runner).unwrap();
+        let file = containerfile::generate(&prepared.base, false, &prepared.addons).unwrap();
+        assert!(file.contains(&format!("COPY --from={} / /", runner.selected_ref)));
+    }
+
+    #[test]
+    fn failed_manifest_inspection_never_uses_a_pulled_local_variant() {
+        let digest = format!("sha256:{}", "d".repeat(64));
+        for cli in [ContainerCli::Podman, ContainerCli::Docker] {
+            let mut runner = FakeRunner::new(None, &digest, true);
+            runner.local_index_digest = Some(format!("sha256:{}", "f".repeat(64)));
+            let reason = resolve(BASE, &[ADDON.to_owned()], &cli, &runner)
+                .err()
+                .expect("an unavailable index must not be mistaken for a single image");
+            assert!(reason.to_string().contains("manifest inspection failed"));
+            assert!(!runner.commands().iter().any(|args| args[1] == "pull"));
+        }
+    }
+
+    #[test]
+    fn docker_single_image_uses_digest_for_requested_repository() {
+        let digest = format!("sha256:{}", "d".repeat(64));
+        let runner = FakeRunner::new(Some(json!({"schemaVersion": 2})), &digest, true);
 
         let prepared = resolve(BASE, &[ADDON.to_owned()], &ContainerCli::Docker, &runner).unwrap();
         let file = containerfile::generate(&prepared.base, false, &prepared.addons).unwrap();
