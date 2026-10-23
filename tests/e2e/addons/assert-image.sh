@@ -21,7 +21,8 @@ last_fixture=$1
 last_variant=$2
 expected_copies=$3
 expected_names=$4
-shift 4
+expected_base=$5
+shift 5
 test "$(cat "$root/last-applied")" = "$last_fixture:$last_variant"
 test -n "${PATH:-}"
 env | grep -Fx "OSBI_TEST_VARIANT=$last_variant" > /dev/null
@@ -50,3 +51,4 @@ while test "$#" -gt 0; do
 done
 actual_copies=$(grep '^COPY --from=ghcr.io/openkaiden/tests/' /root/Containerfile || true)
 test "$actual_copies" = "$expected_copies"
+grep -Fx "FROM $expected_base AS system" /root/Containerfile > /dev/null

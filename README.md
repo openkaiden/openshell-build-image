@@ -227,7 +227,11 @@ OpenShell manages CA certificates for the sandbox. The image builder does not di
 
 ## Saving the Containerfile
 
-Pass `--copy-containerfile` to include the exact Containerfile used for the build at `$HOME/Containerfile` **inside the image**, using the home directory and user inherited from the base image.
+Pass `--copy-containerfile` to include a Containerfile describing the build at
+`$HOME/Containerfile` **inside the image**, using the home directory and user
+inherited from the base image. For addon builds, host runtimes may build from
+an inspected image ID or temporary tag; the copied file uses the requested
+`--from` reference so it remains readable after that local reference is gone.
 
 ```sh
 openshell-build-image --runtime podman --from myproject:dev --copy-containerfile myimage:latest
@@ -246,7 +250,7 @@ openshell-build-image --runtime <RUNTIME> --from <IMAGE> [OPTIONS] <TAG>
 | `--runtime <RUNTIME>`          | Backend to build the image with (`podman`, `docker`, `container`, `vm` — see [Building in a VM](#building-in-a-vm---runtime-vm)) |
 | `--from <IMAGE>`               | Required project image to build from (name, tag, or digest) |
 | `--addon <IMAGE>`              | OCI addon to apply after the base image. Repeat in the desired order. |
-| `--copy-containerfile`         | Copy the build Containerfile to `$HOME/Containerfile` inside the image |
+| `--copy-containerfile`         | Copy a Containerfile describing the build to `$HOME/Containerfile` inside the image |
 | `--vm-rootfs <DIR>`            | Root filesystem the build VM boots from (`--runtime vm` only). Defaults to the one embedded in the binary. |
 | `--vm-output <FILE>`           | Path for the rootfs tarball produced by `--runtime vm`. Defaults to a name derived from `<TAG>` in the current directory. |
 | `--vm-cpus <N>`                | vCPUs given to the build VM (`--runtime vm` only). Default `2`.     |

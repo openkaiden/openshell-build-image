@@ -165,7 +165,7 @@ struct Cli {
     verbose: u8,
     #[arg(
         long,
-        help = "Copy the build Containerfile to $HOME/Containerfile inside the image"
+        help = "Copy a Containerfile describing the build to $HOME/Containerfile inside the image"
     )]
     copy_containerfile: bool,
     #[arg(

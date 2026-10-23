@@ -185,7 +185,7 @@ build_case() {
   local run_options=(--name "$check_name" --entrypoint /bin/sh)
   if [[ $runtime != container ]]; then run_options+=(--network none); fi
   "$runtime" run "${run_options[@]}" "$image" -c "$verify_script" addon-check \
-    "$last_fixture" "$last_variant" "$copies" "${fixtures[*]}" "${pairs[@]}" \
+    "$last_fixture" "$last_variant" "$copies" "${fixtures[*]}" "$from" "${pairs[@]}" \
     > "$artifacts/$case_name.inspect.log" 2>&1
   # Keep the platforms-libc result as E2E_SOURCE for the later OpenShell sandbox.
   # Apple container supplies a rootfs tarball; Podman and Docker supply an image tag.
