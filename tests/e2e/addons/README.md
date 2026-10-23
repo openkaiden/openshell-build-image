@@ -24,8 +24,10 @@ Docker, and Apple container. It runs `assert-image.sh` inside each result to
 check files, environment values, and selected `COPY` digests. Ubuntu and Alpine
 builds cover each fixture shape, including glibc and musl selection. The Ubuntu
 jobs also check addon order, repeated references, unsupported platforms, and
-bases without a detectable libc. Podman and Docker also build an image for the
-opposite CPU architecture without running it. Each build records its runtime commands so
+bases without a detectable libc. The Alpine jobs build a temporary `gcompat`
+base, verify that it has both loader types, and check that the multi-libc addon
+selects musl. Podman and Docker also build an image for the opposite CPU
+architecture without running it. Each build records its runtime commands so
 the tests can assert that libc detection exports the base exactly when needed.
 The resulting `platforms-libc` image is used for the OpenShell sandbox and
 network-policy test. `cleanup.sh` removes the built images and downloaded

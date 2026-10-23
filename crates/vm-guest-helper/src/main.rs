@@ -112,12 +112,15 @@ fn detect_libc(root: &Path) -> Result<Libc> {
     for directory in ["lib", "lib64", "usr/lib", "usr/lib64"] {
         scan_library_dir(root, Path::new(directory), &mut glibc, &mut musl)?;
     }
+    // Prefer musl when both loaders are present. This is a selection policy
+    // for mixed-libc images, not a claim about which libc came first.
     match (glibc, musl) {
         (true, false) => Ok(Libc::Glibc),
-        (false, true) => Ok(Libc::Musl),
-        _ => Err(
-            format!("base libc is unclear (glibc markers: {glibc}, musl markers: {musl})").into(),
-        ),
+        (_, true) => Ok(Libc::Musl),
+        (false, false) => Err(format!(
+            "base libc is unclear (glibc markers: {glibc}, musl markers: {musl})"
+        )
+        .into()),
     }
 }
 
@@ -458,7 +461,7 @@ mod tests {
     }
 
     #[test]
-    fn mounted_base_libc_uses_shared_marker_rules() {
+    fn mounted_base_prefers_musl_when_both_loaders_exist() {
         let root = tempfile::tempdir().unwrap();
         fs::create_dir_all(root.path().join("usr/lib/aarch64-linux-gnu")).unwrap();
         fs::write(
@@ -470,6 +473,12 @@ mod tests {
         assert_eq!(detect_libc(root.path()).unwrap(), Libc::Glibc);
         fs::create_dir_all(root.path().join("lib")).unwrap();
         fs::write(root.path().join("lib/ld-musl-aarch64.so.1"), []).unwrap();
+        assert_eq!(detect_libc(root.path()).unwrap(), Libc::Musl);
+    }
+
+    #[test]
+    fn mounted_base_without_loaders_has_unclear_libc() {
+        let root = tempfile::tempdir().unwrap();
         assert!(
             detect_libc(root.path())
                 .unwrap_err()
