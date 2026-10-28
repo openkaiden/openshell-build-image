@@ -61,11 +61,13 @@
 
 use std::io::Write as _;
 use std::path::Path;
-use std::process::{Command, ExitStatus};
+use std::process::{Command, ExitStatus, Output};
 
 use which::which;
 
 use tempfile::NamedTempFile;
+
+pub mod base;
 
 // ---------------------------------------------------------------------------
 // ContainerCli
@@ -191,6 +193,11 @@ impl std::error::Error for RuntimeNotFoundError {}
 pub trait Runner {
     /// Runs `cmd` and returns its [`ExitStatus`].
     fn run(&self, cmd: &mut Command) -> std::io::Result<ExitStatus>;
+
+    /// Runs `cmd` and captures its output for image inspection.
+    fn output(&self, cmd: &mut Command) -> std::io::Result<Output> {
+        cmd.output()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -308,21 +315,81 @@ pub fn build(
     runner: &dyn Runner,
     context_dir: &Path,
 ) -> Result<(), BuildError> {
+    build_with_pull_policy(containerfile, tag, cli, runner, context_dir, false, None)
+}
+
+/// Builds from image references that were already prepared in the runtime's
+/// local store. Podman and Docker are instructed not to pull during the build;
+/// Apple's `container build` uses its local store unless `--pull` is supplied.
+pub fn build_with_local_images(
+    containerfile: &str,
+    tag: &str,
+    cli: &ContainerCli,
+    runner: &dyn Runner,
+    context_dir: &Path,
+) -> Result<(), BuildError> {
+    build_with_pull_policy(containerfile, tag, cli, runner, context_dir, true, None)
+}
+
+/// Build from already prepared images using the platform of the inspected
+/// base. This matters when the base is a non-native platform image already in
+/// the local store: the builder must choose addon payloads for that platform.
+pub fn build_with_local_images_on_platform(
+    containerfile: &str,
+    tag: &str,
+    cli: &ContainerCli,
+    runner: &dyn Runner,
+    context_dir: &Path,
+    platform: &base::BasePlatform,
+) -> Result<(), BuildError> {
+    build_with_pull_policy(
+        containerfile,
+        tag,
+        cli,
+        runner,
+        context_dir,
+        true,
+        Some(platform),
+    )
+}
+
+fn build_with_pull_policy(
+    containerfile: &str,
+    tag: &str,
+    cli: &ContainerCli,
+    runner: &dyn Runner,
+    context_dir: &Path,
+    local_only: bool,
+    platform: Option<&base::BasePlatform>,
+) -> Result<(), BuildError> {
     let mut tmpfile = NamedTempFile::new()?;
     tmpfile.write_all(containerfile.as_bytes())?;
 
-    log::debug!(
-        "running: {} build -f {} -t {tag} {}",
-        cli.binary(),
-        tmpfile.path().display(),
-        context_dir.display()
-    );
-
     let mut cmd = Command::new(cli.binary());
-    cmd.args(["build", "-f"])
+    cmd.arg("build");
+    if local_only {
+        match cli {
+            ContainerCli::Podman => cmd.arg("--pull=never"),
+            ContainerCli::Docker => cmd.arg("--pull=false"),
+            ContainerCli::MacOsContainer => &mut cmd,
+        };
+    }
+    if let Some(platform) = platform
+        && *cli != ContainerCli::MacOsContainer
+    {
+        let mut value = format!("{}/{}", platform.os, platform.architecture);
+        if let Some(variant) = &platform.variant {
+            value.push('/');
+            value.push_str(variant);
+        }
+        cmd.arg("--platform").arg(value);
+    }
+    cmd.arg("-f")
         .arg(tmpfile.path())
         .args(["-t", tag])
         .arg(context_dir);
+
+    log::debug!("running: {cmd:?}");
 
     let status = runner.run(&mut cmd)?;
 
@@ -342,6 +409,7 @@ pub fn build(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::RefCell;
     use std::io;
 
     struct FakeRunner(fn() -> io::Result<ExitStatus>);
@@ -540,5 +608,63 @@ mod tests {
             )
             .is_ok()
         );
+    }
+
+    #[test]
+    fn local_builds_forbid_pulling_on_podman_and_docker() {
+        struct CaptureRunner(RefCell<Vec<String>>);
+
+        impl Runner for CaptureRunner {
+            fn run(&self, cmd: &mut Command) -> io::Result<ExitStatus> {
+                *self.0.borrow_mut() = cmd
+                    .get_args()
+                    .map(|arg| arg.to_string_lossy().into_owned())
+                    .collect();
+                Ok(exit_with(0))
+            }
+        }
+
+        for (cli, expected_flag) in [
+            (ContainerCli::Podman, Some("--pull=never")),
+            (ContainerCli::Docker, Some("--pull=false")),
+            (ContainerCli::MacOsContainer, None),
+        ] {
+            let runner = CaptureRunner(RefCell::new(Vec::new()));
+            build_with_local_images(CONTAINERFILE, TAG, &cli, &runner, Path::new("."))
+                .expect("local build should succeed");
+            let args = runner.0.borrow();
+            assert_eq!(args[0], "build");
+            assert_eq!(
+                args.get(1).map(String::as_str),
+                expected_flag.or(Some("-f"))
+            );
+            assert_eq!(
+                args.iter().any(|arg| arg.starts_with("--pull")),
+                expected_flag.is_some()
+            );
+        }
+
+        let platform = base::BasePlatform {
+            os: "linux".to_owned(),
+            architecture: "amd64".to_owned(),
+            variant: None,
+        };
+        for cli in [ContainerCli::Podman, ContainerCli::Docker] {
+            let runner = CaptureRunner(RefCell::new(Vec::new()));
+            build_with_local_images_on_platform(
+                CONTAINERFILE,
+                TAG,
+                &cli,
+                &runner,
+                Path::new("."),
+                &platform,
+            )
+            .unwrap();
+            let args = runner.0.borrow();
+            assert!(
+                args.windows(2)
+                    .any(|pair| pair == ["--platform", "linux/amd64"])
+            );
+        }
     }
 }

@@ -14,16 +14,26 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-mod containerfile;
+mod backend;
+mod host_addon;
+mod registry;
 mod vm_rootfs;
 
 use std::net::IpAddr;
-use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::path::Path;
+use std::path::PathBuf;
 
 use clap::Parser;
-use container_image_builder::{ContainerCli, ContainerRunner, Runner, build};
+use container_image_builder::{ContainerCli, ContainerRunner};
 use log::LevelFilter;
-use vm_image_builder::{KrunRunner, VmConfig, VmRunner, build as vm_build};
+use openshell_build_image::containerfile;
+use vm_image_builder::{KrunRunner, VmConfig, VmRunner};
+
+use crate::backend::{
+    AppleContainerBackend, BuildError, BuildRequest, BuildResult, DockerBackend, ImageBackend,
+    PodmanBackend, VmBackend,
+};
 
 /// Selects how images are built.
 ///
@@ -59,19 +69,57 @@ impl Runtime {
     }
 }
 
-/// Where [`run`] sends the generated Containerfile to be built.
-///
-/// The two variants carry different runner traits because the backends differ
-/// in kind, not just in configuration: one spawns a process, the other boots a
-/// VM and writes its result to a path on disk.
+/// Test adapter that keeps runner injection concise in the CLI tests.
+#[cfg(test)]
 enum Backend<'a> {
-    /// Shell out to a container CLI, leaving a tagged image in its image store.
-    Cli(&'a ContainerCli, &'a dyn Runner),
-    /// Build in a microVM, writing a flattened rootfs tarball to the path.
+    Cli(&'a ContainerCli, &'a dyn container_image_builder::Runner),
     Vm(&'a VmConfig, &'a dyn VmRunner, &'a Path),
 }
 
-/// What `--runtime` resolved to, owning the values [`Backend`] borrows.
+#[cfg(test)]
+impl ImageBackend for Backend<'_> {
+    fn check_ready(&self) -> Result<(), BuildError> {
+        match self {
+            Backend::Cli(ContainerCli::Podman, runner) => {
+                PodmanBackend { runner: *runner }.check_ready()
+            }
+            Backend::Cli(ContainerCli::Docker, runner) => {
+                DockerBackend { runner: *runner }.check_ready()
+            }
+            Backend::Cli(ContainerCli::MacOsContainer, runner) => {
+                AppleContainerBackend { runner: *runner }.check_ready()
+            }
+            Backend::Vm(config, runner, output) => VmBackend {
+                config,
+                runner: *runner,
+                output,
+            }
+            .check_ready(),
+        }
+    }
+
+    fn build(&self, request: &BuildRequest<'_>) -> Result<BuildResult, BuildError> {
+        match self {
+            Backend::Cli(ContainerCli::Podman, runner) => {
+                PodmanBackend { runner: *runner }.build(request)
+            }
+            Backend::Cli(ContainerCli::Docker, runner) => {
+                DockerBackend { runner: *runner }.build(request)
+            }
+            Backend::Cli(ContainerCli::MacOsContainer, runner) => {
+                AppleContainerBackend { runner: *runner }.build(request)
+            }
+            Backend::Vm(config, runner, output) => VmBackend {
+                config,
+                runner: *runner,
+                output,
+            }
+            .build(request),
+        }
+    }
+}
+
+/// What `--runtime` resolved to, owning the values a backend borrows.
 ///
 /// The VM variant carries its output path because that is settled while the
 /// runtime is chosen — from `--vm-output`, or derived from the tag.
@@ -103,6 +151,13 @@ struct Cli {
     )]
     from: String,
     #[arg(
+        long,
+        value_name = "IMAGE",
+        value_parser = containerfile::parse_image_reference,
+        help = "OCI addon image to copy into the built image (repeatable, in order)"
+    )]
+    addon: Vec<String>,
+    #[arg(
         short = 'v',
         action = clap::ArgAction::Count,
         help = "Increase log verbosity (-v info, -vv debug)"
@@ -110,7 +165,7 @@ struct Cli {
     verbose: u8,
     #[arg(
         long,
-        help = "Copy the build Containerfile to $HOME/Containerfile inside the image"
+        help = "Copy a Containerfile describing the build to $HOME/Containerfile inside the image"
     )]
     copy_containerfile: bool,
     #[arg(
@@ -169,8 +224,8 @@ fn main() {
         std::process::exit(1);
     }
 
-    // `Backend` borrows what it points at, so the owned values have to outlive
-    // it: this resolves them first, then borrows them below.
+    // Backends borrow their VM configuration, so the selected values must
+    // outlive the backend.
     let selected = match select_runtime(&cli) {
         Ok(selected) => selected,
         Err(e) => {
@@ -178,14 +233,28 @@ fn main() {
             std::process::exit(1);
         }
     };
-    let backend = backend_for(&selected);
-
-    if let Err(e) = run(&cli.tag, &cli.from, cli.copy_containerfile, &backend) {
+    let backend = backend_for(&selected, &ContainerRunner, &KrunRunner);
+    if let Err(e) = backend.check_ready() {
         eprintln!("Error: {e}");
         std::process::exit(1);
     }
 
-    if let Some(summary) = build_summary(&selected) {
+    let result = run(
+        &cli.tag,
+        &cli.from,
+        &cli.addon,
+        cli.copy_containerfile,
+        backend.as_ref(),
+    );
+    let result = match result {
+        Ok(result) => result,
+        Err(e) => {
+            eprintln!("Error: {e}");
+            std::process::exit(1);
+        }
+    };
+
+    if let Some(summary) = build_summary(&result) {
         println!("{summary}");
     }
 }
@@ -286,18 +355,11 @@ fn vm_output_path(tag: &str) -> PathBuf {
     PathBuf::from(format!("{name}.tar"))
 }
 
-/// Resolves `--runtime` and the flags that go with it into the backend to build
-/// through, rejecting a backend that cannot run.
-///
-/// Each backend validates what it needs here, before any staging work happens,
-/// so a container CLI missing from `PATH` or an unusable VM rootfs fails
-/// immediately rather than after the build context has been assembled.
+/// Resolve `--runtime` and its flags before constructing a backend. VM support
+/// is checked before extracting an embedded rootfs, which can be expensive.
 fn select_runtime(cli: &Cli) -> Result<Selected, String> {
     match cli.runtime.container_cli() {
-        Some(container_cli) => {
-            container_cli.check_in_path().map_err(|e| e.to_string())?;
-            Ok(Selected::Cli(container_cli))
-        }
+        Some(container_cli) => Ok(Selected::Cli(container_cli)),
         None => {
             // Before the rootfs, which on a default run means unpacking the
             // embedded one: an unsupported host, or a binary built without the
@@ -321,7 +383,6 @@ fn select_vm(cli: &Cli) -> Result<Selected, String> {
         cli.vm_memory,
         &cli.vm_dns,
     )?;
-    config.check_rootfs().map_err(|e| e.to_string())?;
     let output = cli
         .vm_output
         .clone()
@@ -329,11 +390,21 @@ fn select_vm(cli: &Cli) -> Result<Selected, String> {
     Ok(Selected::Vm(config, output))
 }
 
-/// Borrows a [`Selected`] as the [`Backend`] that [`run`] builds through.
-fn backend_for(selected: &Selected) -> Backend<'_> {
+/// Construct the selected complete-build implementation once.
+fn backend_for<'a>(
+    selected: &'a Selected,
+    runner: &'a dyn container_image_builder::Runner,
+    vm_runner: &'a dyn VmRunner,
+) -> Box<dyn ImageBackend + 'a> {
     match selected {
-        Selected::Cli(container_cli) => Backend::Cli(container_cli, &ContainerRunner),
-        Selected::Vm(config, output) => Backend::Vm(config, &KrunRunner, output),
+        Selected::Cli(ContainerCli::Podman) => Box::new(PodmanBackend { runner }),
+        Selected::Cli(ContainerCli::Docker) => Box::new(DockerBackend { runner }),
+        Selected::Cli(ContainerCli::MacOsContainer) => Box::new(AppleContainerBackend { runner }),
+        Selected::Vm(config, output) => Box::new(VmBackend {
+            config,
+            runner: vm_runner,
+            output,
+        }),
     }
 }
 
@@ -341,39 +412,36 @@ fn backend_for(selected: &Selected) -> Backend<'_> {
 ///
 /// A CLI build leaves a tagged image the user can look up, so there is nothing
 /// to add; a VM build leaves a file, so say where it landed.
-fn build_summary(selected: &Selected) -> Option<String> {
-    match selected {
-        Selected::Cli(_) => None,
-        Selected::Vm(_, output) => Some(format!("Wrote {}", output.display())),
+fn build_summary(result: &BuildResult) -> Option<String> {
+    match result {
+        BuildResult::Image { .. } => None,
+        BuildResult::VmArtifact { rootfs_tar, config } => Some(match config {
+            Some(config) => format!("Wrote {} and {}", rootfs_tar.display(), config.display()),
+            None => format!("Wrote {}", rootfs_tar.display()),
+        }),
     }
 }
 
 fn run(
     tag: &str,
     from: &str,
+    addons: &[String],
     copy_containerfile: bool,
-    backend: &Backend,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let context_dir = tempfile::Builder::new()
-        .prefix("openshell-build-image")
-        .tempdir()?;
-    let output = containerfile::generate(from, copy_containerfile)?;
-    if copy_containerfile {
-        std::fs::write(context_dir.path().join("build-containerfile"), &output)?;
-    }
-    match backend {
-        Backend::Cli(cli, runner) => build(&output, tag, cli, *runner, context_dir.path())?,
-        Backend::Vm(config, runner, vm_output) => {
-            vm_build(&output, tag, config, *runner, context_dir.path(), vm_output)?
-        }
-    }
-    Ok(())
+    backend: &dyn ImageBackend,
+) -> Result<BuildResult, BuildError> {
+    backend.build(&BuildRequest {
+        from,
+        addons,
+        tag,
+        copy_containerfile,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use clap::CommandFactory;
+    use container_image_builder::Runner;
     use std::process::{Command, ExitStatus};
 
     struct FakeRunner(i32);
@@ -406,7 +474,9 @@ mod tests {
 
     // Stands in for the microVM: records the build it was handed so tests can
     // assert on it without libkrun, which is unavailable in CI.
-    struct FakeVmRunner(std::sync::Mutex<Option<(vm_image_builder::VmBuild, String)>>);
+    struct FakeVmRunner(
+        std::sync::Mutex<Option<(vm_image_builder::VmBuild, String, serde_json::Value)>>,
+    );
 
     impl FakeVmRunner {
         fn new() -> Self {
@@ -431,6 +501,15 @@ mod tests {
                 .expect("VM runner was not called")
                 .1
         }
+
+        fn request(&self) -> serde_json::Value {
+            self.0
+                .lock()
+                .unwrap()
+                .clone()
+                .expect("VM runner was not called")
+                .2
+        }
     }
 
     impl VmRunner for FakeVmRunner {
@@ -441,13 +520,22 @@ mod tests {
             // `run` deletes the context directory as soon as it returns, so the
             // Containerfile has to be read here, while the VM would see it.
             let containerfile = std::fs::read_to_string(build.context.join("Containerfile"))?;
+            let request: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(build.context.join("build-request.json"))?)
+                    .unwrap();
+            assert_eq!(request["version"], 1);
+            assert_eq!(request["tag"], build.tag);
+            assert_eq!(
+                build.request_vm_path().as_deref(),
+                Some("/build/context/build-request.json")
+            );
             if containerfile.contains("COPY build-containerfile") {
                 assert_eq!(
                     std::fs::read_to_string(build.context.join("build-containerfile"))?,
                     containerfile
                 );
             }
-            *self.0.lock().unwrap() = Some((build.clone(), containerfile));
+            *self.0.lock().unwrap() = Some((build.clone(), containerfile, request));
             Ok(())
         }
     }
@@ -459,12 +547,15 @@ mod tests {
         std::fs::create_dir_all(&bin).unwrap();
         let helper = bin.join("vm-build");
         std::fs::write(&helper, "#!/bin/sh\n").unwrap();
+        let resolver = bin.join("vm-guest-helper");
+        std::fs::write(&resolver, "#!/bin/sh\n").unwrap();
         // `check_rootfs` requires the execute bit, as libkrun exec's the
         // helper. Only Unix has one, and only there does the check run.
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755)).unwrap();
+            std::fs::set_permissions(&resolver, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
         rootfs
     }
@@ -524,12 +615,143 @@ mod tests {
     }
 
     #[test]
+    fn addon_accepts_zero_one_or_many_images_for_every_runtime() {
+        for runtime in ["podman", "docker", "container", "vm"] {
+            let first = "ghcr.io/example/first@sha256:0123456789abcdef";
+            let second = "ghcr.io/example/second:latest";
+            let base_args = [
+                "test",
+                "--runtime",
+                runtime,
+                "--from",
+                "alpine:3.24",
+                "test:latest",
+            ];
+            assert!(Cli::try_parse_from(base_args).unwrap().addon.is_empty());
+
+            let one = Cli::try_parse_from([
+                "test",
+                "--runtime",
+                runtime,
+                "--from",
+                "alpine:3.24",
+                "--addon",
+                first,
+                "test:latest",
+            ])
+            .unwrap();
+            assert_eq!(one.addon, [first]);
+
+            let many = Cli::try_parse_from([
+                "test",
+                "--runtime",
+                runtime,
+                "--from",
+                "alpine:3.24",
+                "--addon",
+                first,
+                "--addon",
+                second,
+                "--addon",
+                first,
+                "test:latest",
+            ])
+            .unwrap();
+            assert_eq!(many.addon, [first, second, first]);
+        }
+    }
+
+    #[test]
+    fn addon_rejects_empty_and_multiline_values() {
+        for image in ["", "addon AS injected", "addon\nRUN touch /injected"] {
+            let err = Cli::try_parse_from([
+                "test",
+                "--runtime",
+                "podman",
+                "--from",
+                "alpine:3.24",
+                "--addon",
+                image,
+                "test:latest",
+            ])
+            .err()
+            .expect("invalid --addon should fail");
+            assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation);
+        }
+    }
+
+    #[test]
+    fn vm_addon_request_reaches_the_guest_in_order() {
+        let temp = tempfile::tempdir().unwrap();
+        let rootfs = fake_vm_rootfs(temp.path());
+        let config = VmConfig {
+            rootfs,
+            cpus: 2,
+            memory_mib: 1024,
+            nameservers: vec![],
+        };
+        let output = temp.path().join("output.tar");
+        let runner = FakeVmRunner::new();
+        let result = run(
+            "test:latest",
+            "alpine:3.24",
+            &[
+                "ghcr.io/example/addon:latest".to_owned(),
+                "ghcr.io/example/second:latest".to_owned(),
+                "ghcr.io/example/addon:latest".to_owned(),
+            ],
+            false,
+            &Backend::Vm(&config, &runner, &output),
+        );
+        assert_eq!(
+            result.unwrap(),
+            BuildResult::VmArtifact {
+                rootfs_tar: output.clone(),
+                config: Some(PathBuf::from(format!("{}.config.json", output.display()))),
+            }
+        );
+        let build = runner.captured();
+        assert_eq!(
+            build.request_vm_path().as_deref(),
+            Some("/build/context/build-request.json")
+        );
+        assert_eq!(
+            runner.request()["addons"],
+            serde_json::json!([
+                "ghcr.io/example/addon:latest",
+                "ghcr.io/example/second:latest",
+                "ghcr.io/example/addon:latest"
+            ])
+        );
+    }
+
+    #[test]
+    fn vm_addon_requires_a_guest_resolver_in_the_rootfs() {
+        let temp = tempfile::tempdir().unwrap();
+        let rootfs = fake_vm_rootfs(temp.path());
+        std::fs::remove_file(rootfs.join("usr/local/bin/vm-guest-helper")).unwrap();
+        let config = VmConfig::new(&rootfs);
+        let output = temp.path().join("output.tar");
+        let runner = FakeVmRunner::new();
+        let error = run(
+            "test:latest",
+            "alpine:3.24",
+            &["ghcr.io/example/addon:latest".to_owned()],
+            false,
+            &Backend::Vm(&config, &runner, &output),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("rebuild it to use --addon"));
+    }
+
+    #[test]
     fn run_passes_project_image_to_cli_backend() {
         let capture = ContainerfileCapture(std::sync::Mutex::new(String::new()));
         let image = "localhost:5000/project/tools:dev";
         run(
             "test:latest",
             image,
+            &[],
             false,
             &Backend::Cli(&ContainerCli::Podman, &capture),
         )
@@ -595,6 +817,7 @@ mod tests {
             run(
                 "test:latest",
                 "ghcr.io/example/project:dev",
+                &[],
                 enabled,
                 &Backend::Cli(&ContainerCli::Podman, &CopyChecker(enabled)),
             )
@@ -609,6 +832,7 @@ mod tests {
         let result = run(
             "test:latest",
             "ghcr.io/example/project:dev",
+            &[],
             false,
             &Backend::Cli(&ContainerCli::Podman, &FakeRunner(0)),
         );
@@ -620,10 +844,106 @@ mod tests {
         let result = run(
             "test:latest",
             "ghcr.io/example/project:dev",
+            &[],
             false,
             &Backend::Cli(&ContainerCli::Podman, &FakeRunner(1)),
         );
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn docker_addon_build_uses_a_local_base_tag_and_cleans_it_up() {
+        use std::cell::RefCell;
+        use std::process::Output;
+
+        struct DockerCapture {
+            commands: RefCell<Vec<Vec<String>>>,
+            containerfile: RefCell<String>,
+            fail_build: bool,
+        }
+
+        impl Runner for DockerCapture {
+            fn run(&self, cmd: &mut Command) -> std::io::Result<ExitStatus> {
+                let args: Vec<String> = std::iter::once(cmd.get_program())
+                    .chain(cmd.get_args())
+                    .map(|arg| arg.to_string_lossy().into_owned())
+                    .collect();
+                if args[1] == "build" {
+                    let file = args[args.iter().position(|arg| arg == "-f").unwrap() + 1].clone();
+                    *self.containerfile.borrow_mut() = std::fs::read_to_string(file)?;
+                }
+                self.commands.borrow_mut().push(args.clone());
+                FakeRunner(i32::from(args[1] == "build" && self.fail_build)).run(cmd)
+            }
+
+            fn output(&self, cmd: &mut Command) -> std::io::Result<Output> {
+                let args: Vec<String> = std::iter::once(cmd.get_program())
+                    .chain(cmd.get_args())
+                    .map(|arg| arg.to_string_lossy().into_owned())
+                    .collect();
+                let digest = format!("sha256:{}", "b".repeat(64));
+                let value = if args[1] == "manifest" {
+                    serde_json::json!({
+                        "schemaVersion": 2,
+                        "mediaType": "application/vnd.oci.image.index.v1+json",
+                        "manifests": [{
+                            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+                            "digest": digest,
+                            "platform": {"os": "linux", "architecture": "arm64"}
+                        }]
+                    })
+                } else if args[3] == "example.test/base:latest" {
+                    serde_json::json!([{
+                        "Id": format!("sha256:{}", "a".repeat(64)),
+                        "Os": "linux",
+                        "Architecture": "arm64"
+                    }])
+                } else {
+                    assert_eq!(args[3], format!("example.test/addon@{digest}"));
+                    serde_json::json!([{
+                        "Os": "linux",
+                        "Architecture": "arm64",
+                        "Config": {"Env": ["ADDON_TEST=selected"]}
+                    }])
+                };
+                self.commands.borrow_mut().push(args);
+                Ok(Output {
+                    status: FakeRunner(0).run(cmd)?,
+                    stdout: serde_json::to_vec(&value).unwrap(),
+                    stderr: Vec::new(),
+                })
+            }
+        }
+
+        for fail_build in [false, true] {
+            let capture = DockerCapture {
+                commands: RefCell::new(Vec::new()),
+                containerfile: RefCell::new(String::new()),
+                fail_build,
+            };
+            let result = run(
+                "test:latest",
+                "example.test/base:latest",
+                &["example.test/addon:latest".to_owned()],
+                false,
+                &Backend::Cli(&ContainerCli::Docker, &capture),
+            );
+            assert_eq!(result.is_err(), fail_build);
+            let commands = capture.commands.borrow();
+            let tag = commands
+                .iter()
+                .find(|args| args[1..3] == ["image", "tag"])
+                .unwrap()
+                .last()
+                .unwrap();
+            assert!(
+                capture
+                    .containerfile
+                    .borrow()
+                    .contains(&format!("FROM {tag} AS system"))
+            );
+            assert_eq!(commands.last().unwrap(), &["docker", "image", "rm", tag]);
+        }
     }
 
     #[test]
@@ -632,6 +952,7 @@ mod tests {
         run(
             "test:latest",
             "ghcr.io/example/project:dev",
+            &[],
             false,
             &Backend::Cli(&ContainerCli::Podman, &capture),
         )
@@ -838,6 +1159,7 @@ mod tests {
         let result = run(
             "test:latest",
             "ghcr.io/example/project:dev",
+            &[],
             false,
             &Backend::Vm(&config, &runner, &output),
         );
@@ -856,6 +1178,7 @@ mod tests {
         run(
             "test:latest",
             "ghcr.io/example/project:dev",
+            &[],
             true,
             &Backend::Vm(&config, &runner, &tmp.path().join("out.tar")),
         )
@@ -889,6 +1212,7 @@ mod tests {
         let result = run(
             "test:latest",
             "ghcr.io/example/project:dev",
+            &[],
             false,
             &Backend::Vm(&config, &FailingVmRunner, &tmp.path().join("out.tar")),
         );
@@ -900,14 +1224,6 @@ mod tests {
         match selected {
             Selected::Vm(config, output) => Some((config, output)),
             Selected::Cli(_) => None,
-        }
-    }
-
-    /// The VM half of a backend, or `None` if it is a CLI backend.
-    fn vm_backend_parts<'a>(backend: Backend<'a>) -> Option<(&'a VmConfig, &'a Path)> {
-        match backend {
-            Backend::Vm(config, _, output) => Some((config, output)),
-            Backend::Cli(..) => None,
         }
     }
 
@@ -982,7 +1298,7 @@ mod tests {
     }
 
     #[test]
-    fn select_runtime_vm_rejects_an_unusable_rootfs() {
+    fn vm_backend_check_ready_rejects_an_unusable_rootfs() {
         let tmp = tempfile::tempdir().unwrap();
         let missing = tmp.path().join("no-such-rootfs");
         let cli = parse_cli(&[
@@ -993,8 +1309,10 @@ mod tests {
             "myimage:latest",
         ])
         .unwrap();
-        // `Selected` has no `Debug`, so `unwrap_err` is unavailable here.
-        let err = select_vm(&cli).err().unwrap();
+        let selected = select_vm(&cli).unwrap();
+        let vm_runner = FakeVmRunner::new();
+        let backend = backend_for(&selected, &FakeRunner(0), &vm_runner);
+        let err = backend.check_ready().err().unwrap().to_string();
         assert!(
             err.contains("no-such-rootfs"),
             "error should name the rootfs: {err}"
@@ -1004,49 +1322,74 @@ mod tests {
     #[test]
     fn select_runtime_cli_takes_the_container_cli_arm() {
         let cli = parse_cli(&["--runtime", "podman", "myimage:latest"]).unwrap();
-        // Whether podman is on PATH varies by machine, and the CLI arm runs
-        // either way. A VM selection would mean the wrong arm was taken; an
-        // error that does not name the binary would mean it failed elsewhere.
-        let r = select_runtime(&cli);
-        let cli_arm = r.map_or_else(|e| e.contains("podman"), |s| vm_parts(s).is_none());
-        assert!(cli_arm, "--runtime podman must take the container CLI arm");
+        assert!(vm_parts(select_runtime(&cli).unwrap()).is_none());
     }
 
     // backend_for
 
     #[test]
-    fn backend_for_maps_each_selection_to_its_backend() {
-        let tmp = tempfile::tempdir().unwrap();
-        let config = VmConfig::new(&fake_vm_rootfs(tmp.path()));
-        let vm = Selected::Vm(config, tmp.path().join("out.tar"));
-        assert!(vm_backend_parts(backend_for(&vm)).is_some());
-        // The CLI arm of both `backend_for` and the helper above.
-        let cli = Selected::Cli(ContainerCli::Docker);
-        assert!(vm_backend_parts(backend_for(&cli)).is_none());
-        // And the CLI arm of `vm_parts`.
-        assert!(vm_parts(cli).is_none());
-    }
+    fn backend_for_dispatches_all_four_runtimes_and_reports_their_results() {
+        use std::cell::RefCell;
 
-    #[test]
-    fn backend_for_vm_selection_passes_through_the_config_and_output() {
+        struct ProgramCapture(RefCell<Vec<String>>);
+
+        impl Runner for ProgramCapture {
+            fn run(&self, cmd: &mut Command) -> std::io::Result<ExitStatus> {
+                self.0
+                    .borrow_mut()
+                    .push(cmd.get_program().to_string_lossy().into_owned());
+                FakeRunner(0).run(cmd)
+            }
+        }
+
+        let capture = ProgramCapture(RefCell::new(Vec::new()));
+        let vm_runner = FakeVmRunner::new();
+        for (cli, program) in [
+            (ContainerCli::Podman, "podman"),
+            (ContainerCli::Docker, "docker"),
+            (ContainerCli::MacOsContainer, "container"),
+        ] {
+            let selected = Selected::Cli(cli);
+            let backend = backend_for(&selected, &capture, &vm_runner);
+            let result = run("test:latest", "alpine:3.24", &[], false, backend.as_ref())
+                .expect("host build should succeed");
+            assert_eq!(
+                result,
+                BuildResult::Image {
+                    tag: "test:latest".to_owned()
+                }
+            );
+            assert_eq!(capture.0.borrow().last().map(String::as_str), Some(program));
+        }
+
         let tmp = tempfile::tempdir().unwrap();
         let rootfs = fake_vm_rootfs(tmp.path());
         let out = tmp.path().join("out.tar");
         let selected = Selected::Vm(VmConfig::new(&rootfs), out.clone());
-        let (config, output) = vm_backend_parts(backend_for(&selected)).unwrap();
-        assert_eq!(config.rootfs, rootfs);
-        assert_eq!(output, out);
+        let backend = backend_for(&selected, &capture, &vm_runner);
+        let result = run("test:latest", "alpine:3.24", &[], false, backend.as_ref())
+            .expect("VM build should succeed");
+        assert_eq!(
+            result,
+            BuildResult::VmArtifact {
+                rootfs_tar: out,
+                config: None,
+            }
+        );
+        assert_eq!(vm_runner.captured().rootfs, rootfs.canonicalize().unwrap());
+        assert_eq!(capture.0.borrow().len(), 3);
     }
 
     // build_summary
 
     #[test]
     fn build_summary_names_the_tarball_a_vm_build_wrote() {
-        let tmp = tempfile::tempdir().unwrap();
-        let config = VmConfig::new(&fake_vm_rootfs(tmp.path()));
-        let selected = Selected::Vm(config, PathBuf::from("out/myimage-latest.tar"));
+        let result = BuildResult::VmArtifact {
+            rootfs_tar: PathBuf::from("out/myimage-latest.tar"),
+            config: None,
+        };
         assert_eq!(
-            build_summary(&selected).as_deref(),
+            build_summary(&result).as_deref(),
             Some("Wrote out/myimage-latest.tar")
         );
     }
@@ -1054,6 +1397,11 @@ mod tests {
     #[test]
     fn build_summary_is_silent_for_a_cli_build() {
         // The image lands in the CLI's own store, so there is no path to report.
-        assert_eq!(build_summary(&Selected::Cli(ContainerCli::Podman)), None);
+        assert_eq!(
+            build_summary(&BuildResult::Image {
+                tag: "test:latest".to_owned()
+            }),
+            None
+        );
     }
 }
