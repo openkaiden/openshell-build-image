@@ -46,6 +46,30 @@ fn addon_error(image: &str, reason: impl std::fmt::Display) -> HostAddonError {
     error(format!("addon {image:?}: {reason}"))
 }
 
+fn manifest_inspection_error(image: &str, stderr: &str) -> HostAddonError {
+    let details = stderr.trim();
+    let lower = details.to_ascii_lowercase();
+    if [
+        "manifest unknown",
+        "manifest_unknown",
+        "no such manifest",
+        "name unknown",
+        "name_unknown",
+    ]
+    .iter()
+    .any(|message| lower.contains(message))
+    {
+        addon_error(
+            image,
+            format!(
+                "image or tag not found in the registry. Check that the --addon image name and tag (or digest) are correct and have been published.\nRegistry error: {details}"
+            ),
+        )
+    } else {
+        addon_error(image, format!("manifest inspection failed: {details}"))
+    }
+}
+
 pub struct HostAddons {
     pub base: String,
     pub platform: BasePlatform,
@@ -296,10 +320,7 @@ fn load_catalog(
                     ),
                 ));
             }
-            return Err(addon_error(
-                image,
-                format!("manifest inspection failed: {}", stderr.trim()),
-            ));
+            return Err(manifest_inspection_error(image, &stderr));
         }
         let raw =
             std::str::from_utf8(&output.stdout).map_err(|reason| addon_error(image, reason))?;
@@ -857,6 +878,77 @@ mod tests {
         let digest = format!("sha256:{}", "d".repeat(64));
         let mut runner = FakeRunner::new(None, &digest, true);
         runner.manifest_error = "not a manifest list";
+
+        let prepared = resolve(BASE, &[ADDON.to_owned()], &ContainerCli::Podman, &runner).unwrap();
+        let file = containerfile::generate(&prepared.base, false, &prepared.addons).unwrap();
+        assert!(file.contains(&format!("COPY --from={} / /", runner.selected_ref)));
+        assert!(!runner.commands().iter().any(|args| args[1] == "pull"));
+    }
+
+    #[test]
+    fn missing_addon_manifest_reports_image_reference_and_guidance() {
+        let digest = format!("sha256:{}", "d".repeat(64));
+        for cli in [ContainerCli::Podman, ContainerCli::Docker] {
+            for details in [
+                "Error: reading manifest latest in example.test/addon: manifest unknown\n",
+                r#"{"errors":[{"code":"MANIFEST_UNKNOWN","message":"manifest unknown"}]}"#,
+                "no such manifest: example.test/addon:latest",
+                "name unknown: repository name not known to registry",
+                r#"{"errors":[{"code":"NAME_UNKNOWN"}]}"#,
+            ] {
+                let mut runner = FakeRunner::new(None, &digest, false);
+                runner.manifest_error = details;
+
+                let reason = resolve(BASE, &[ADDON.to_owned()], &cli, &runner)
+                    .err()
+                    .expect("an unpublished addon must fail")
+                    .to_string();
+
+                assert!(reason.starts_with(&format!(
+                    "addon {ADDON:?}: image or tag not found in the registry."
+                )));
+                assert!(reason.contains("Check that the --addon image name and tag (or digest)"));
+                assert!(reason.contains("have been published"));
+                assert!(reason.ends_with(&format!("\nRegistry error: {}", details.trim())));
+                assert!(runner.commands().iter().all(|args| {
+                    args[1] == "manifest" || (args[1] == "image" && args[3] == ADDON)
+                }));
+            }
+        }
+    }
+
+    #[test]
+    fn other_manifest_errors_keep_the_original_diagnostic() {
+        let digest = format!("sha256:{}", "d".repeat(64));
+        for cli in [ContainerCli::Podman, ContainerCli::Docker] {
+            for details in [
+                "unauthorized: authentication required",
+                "denied: requested access to the resource is denied",
+                "lookup example.test: no such host",
+                "x509: certificate signed by unknown authority",
+                "Cannot connect to Podman: socket not found",
+            ] {
+                let mut runner = FakeRunner::new(None, &digest, false);
+                runner.manifest_error = details;
+
+                let reason = resolve(BASE, &[ADDON.to_owned()], &cli, &runner)
+                    .err()
+                    .expect("manifest inspection must fail")
+                    .to_string();
+
+                assert_eq!(
+                    reason,
+                    format!("addon {ADDON:?}: manifest inspection failed: {details}")
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn podman_uses_local_single_image_when_remote_tag_is_missing() {
+        let digest = format!("sha256:{}", "d".repeat(64));
+        let mut runner = FakeRunner::new(None, &digest, true);
+        runner.manifest_error = "manifest unknown";
 
         let prepared = resolve(BASE, &[ADDON.to_owned()], &ContainerCli::Podman, &runner).unwrap();
         let file = containerfile::generate(&prepared.base, false, &prepared.addons).unwrap();
