@@ -17,15 +17,17 @@
 #
 # Entry point of the build microVM, exec'd by the vm-image-builder crate.
 #
-# Usage: vm-build <containerfile-vm-path> <tag> <output-filename>
+# Usage: vm-build <containerfile-vm-path> <tag> <output-filename> [request-vm-path]
 #   containerfile-vm-path  path to the Containerfile as seen inside the VM
 #   tag                    image tag for buildah
 #   output-filename        name of the rootfs tarball written to /build/output/
+#   request-vm-path        versioned JSON request in the shared context, when supplied
 set -e
 
 CFILE="$1"
 TAG="$2"
 OUTPUT_FILE="$3"
+REQUEST_FILE="${4:-}"
 
 on_exit() {
     rc=$?
@@ -42,6 +44,10 @@ trap on_exit EXIT
 mkdir -p /build/context /build/output
 mount -t virtiofs openshell-context /build/context
 mount -t virtiofs openshell-output  /build/output
+if [ -n "$REQUEST_FILE" ] && [ ! -f "$REQUEST_FILE" ]; then
+    printf '[vm-build] missing build request: %s\n' "$REQUEST_FILE" >&2
+    exit 1
+fi
 
 # virtiofs on APFS does not fully support xattrs: lgetxattr on dangling symlinks
 # returns ENOENT, which breaks buildah's VFS layer copy. Mount tmpfs over the
@@ -83,7 +89,21 @@ mount -t tmpfs tmpfs /var/tmp
 # Alpine's default soft limit (1024) is too low; raise it to the hard limit.
 ulimit -n "$(ulimit -Hn)"
 
-buildah bud --isolation chroot --network host -f "$CFILE" -t "$TAG" /build/context
+if [ -n "$REQUEST_FILE" ]; then
+    if [ ! -x /usr/local/bin/vm-guest-helper ]; then
+        printf '[vm-build] missing executable guest resolver\n' >&2
+        exit 1
+    fi
+    /usr/local/bin/vm-guest-helper prepare "$REQUEST_FILE" "$CFILE"
+fi
+
+# The resolver has already pulled the base and selected manifest digests into
+# this Buildah store. A build must use those exact local images.
+if [ -f /build/context/.vm-addons-enabled ]; then
+    buildah bud --pull=never --isolation chroot --network host -f "$CFILE" -t "$TAG" /build/context
+else
+    buildah bud --isolation chroot --network host -f "$CFILE" -t "$TAG" /build/context
+fi
 
 # The VM has no access to the host's image store, so the built image is
 # flattened into a tarball handed back through the output share.
@@ -92,3 +112,6 @@ mnt=$(buildah mount "$ctr")
 tar -cf /build/output/"$OUTPUT_FILE" -C "$mnt" .
 buildah umount "$ctr"
 buildah rm "$ctr"
+if [ -f /build/context/.vm-addons-enabled ]; then
+    /usr/local/bin/vm-guest-helper config "$TAG" "/build/output/$OUTPUT_FILE.config.json"
+fi

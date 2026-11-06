@@ -246,6 +246,8 @@ pub struct VmBuild {
     ///
     /// [`output_dir`]: VmBuild::output_dir
     pub output_filename: String,
+    /// Filename of a versioned build request in the context, when supplied.
+    pub request_filename: Option<String>,
     /// Image tag `buildah` builds under, inside the VM.
     pub tag: String,
     /// Number of vCPUs.
@@ -272,6 +274,7 @@ impl VmBuild {
     /// #         context: PathBuf::from("/ctx"),
     /// #         output_dir: PathBuf::from("/out"),
     /// #         output_filename: "out.tar".to_string(),
+    /// #         request_filename: None,
     /// #         tag: "t:latest".to_string(),
     /// #         cpus: 2,
     /// #         memory_mib: 4096,
@@ -304,6 +307,7 @@ impl VmBuild {
     /// #     context: PathBuf::from("/ctx"),
     /// #     output_dir: PathBuf::from("/out"),
     /// #     output_filename: "out.tar".to_string(),
+    /// #     request_filename: None,
     /// #     tag: "t:latest".to_string(),
     /// #     cpus: 2,
     /// #     memory_mib: 4096,
@@ -315,6 +319,13 @@ impl VmBuild {
         format!("/build/context/{CONTAINERFILE_NAME}")
     }
 
+    /// Path to the versioned request inside the guest, when supplied.
+    pub fn request_vm_path(&self) -> Option<String> {
+        self.request_filename
+            .as_ref()
+            .map(|name| format!("/build/context/{name}"))
+    }
+
     /// Returns the host path of the tarball this build produces.
     pub fn output_path(&self) -> PathBuf {
         self.output_dir.join(&self.output_filename)
@@ -323,6 +334,16 @@ impl VmBuild {
 
 /// Name the Containerfile is written under inside the build context.
 const CONTAINERFILE_NAME: &str = "Containerfile";
+const REQUEST_NAME: &str = "build-request.json";
+
+/// Ordered inputs for guest-side addon resolution. The JSON format is versioned
+/// so a future guest helper can reject an incompatible host binary plainly.
+pub struct VmRequest<'a> {
+    pub from: &'a str,
+    pub addons: &'a [String],
+    pub tag: &'a str,
+    pub copy_containerfile: bool,
+}
 
 // ---------------------------------------------------------------------------
 // VmBuildError
@@ -549,6 +570,57 @@ pub fn build(
     context_dir: &Path,
     output: &Path,
 ) -> Result<(), VmBuildError> {
+    build_inner(
+        containerfile,
+        tag,
+        config,
+        runner,
+        context_dir,
+        output,
+        None,
+    )
+}
+
+/// Build with a versioned request staged in the shared context. The guest
+/// resolver uses it to generate a Containerfile when addons are present.
+pub fn build_with_request(
+    containerfile: &str,
+    request: &VmRequest<'_>,
+    config: &VmConfig,
+    runner: &dyn VmRunner,
+    context_dir: &Path,
+    output: &Path,
+) -> Result<(), VmBuildError> {
+    config.check_rootfs()?;
+    let document = serde_json::json!({
+        "version": 1,
+        "from": request.from,
+        "addons": request.addons,
+        "tag": request.tag,
+        "copy_containerfile": request.copy_containerfile,
+    });
+    let content = serde_json::to_vec(&document).map_err(std::io::Error::other)?;
+    write_request(context_dir, &content)?;
+    build_inner(
+        containerfile,
+        request.tag,
+        config,
+        runner,
+        context_dir,
+        output,
+        Some(REQUEST_NAME.to_owned()),
+    )
+}
+
+fn build_inner(
+    containerfile: &str,
+    tag: &str,
+    config: &VmConfig,
+    runner: &dyn VmRunner,
+    context_dir: &Path,
+    output: &Path,
+    request_filename: Option<String>,
+) -> Result<(), VmBuildError> {
     // Validate the rootfs before writing anything: it is the failure most
     // likely to be a misconfiguration, it has by far the most actionable
     // message, and checking it first keeps a doomed build from leaving a
@@ -584,6 +656,7 @@ pub fn build(
         context,
         output_dir,
         output_filename,
+        request_filename,
         tag: tag.to_string(),
         cpus: config.cpus,
         memory_mib: config.memory_mib,
@@ -697,6 +770,26 @@ fn write_containerfile(context_dir: &Path, containerfile: &str) -> Result<(), Vm
         source,
     })?;
     file.write_all(containerfile.as_bytes())?;
+    Ok(())
+}
+
+fn write_request(context_dir: &Path, content: &[u8]) -> Result<(), VmBuildError> {
+    use std::io::Write;
+
+    let path = context_dir.join(REQUEST_NAME);
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    let mut file = options.open(&path).map_err(|source| VmBuildError::Path {
+        what: "build request in the build context",
+        path,
+        source,
+    })?;
+    file.write_all(content)?;
     Ok(())
 }
 
@@ -855,6 +948,45 @@ mod tests {
         assert_eq!(written, CONTAINERFILE);
     }
 
+    #[test]
+    fn build_with_request_stages_versioned_ordered_inputs() {
+        let tmp = tempdir();
+        let context = tmp.path().join("context");
+        std::fs::create_dir_all(&context).unwrap();
+        let runner = CaptureRunner::new();
+        let addons = vec![
+            "example.test/a:1".to_owned(),
+            "example.test/b:2".to_owned(),
+            "example.test/a:1".to_owned(),
+        ];
+        build_with_request(
+            CONTAINERFILE,
+            &VmRequest {
+                from: "alpine:3.24",
+                addons: &addons,
+                tag: TAG,
+                copy_containerfile: true,
+            },
+            &VmConfig::new(&fake_rootfs(tmp.path())),
+            &runner,
+            &context,
+            &tmp.path().join("out.tar"),
+        )
+        .unwrap();
+        let build = runner.captured();
+        assert_eq!(
+            build.request_vm_path().as_deref(),
+            Some("/build/context/build-request.json")
+        );
+        let request: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(context.join(REQUEST_NAME)).unwrap()).unwrap();
+        assert_eq!(request["version"], 1);
+        assert_eq!(request["from"], "alpine:3.24");
+        assert_eq!(request["addons"], serde_json::json!(addons));
+        assert_eq!(request["tag"], TAG);
+        assert_eq!(request["copy_containerfile"], true);
+    }
+
     #[cfg(unix)]
     #[test]
     fn build_refuses_to_follow_a_containerfile_symlink() {
@@ -998,6 +1130,7 @@ mod tests {
             context: PathBuf::from("/ctx"),
             output_dir: PathBuf::from("/out"),
             output_filename: "out.tar".to_string(),
+            request_filename: None,
             tag: TAG.to_string(),
             cpus: 2,
             memory_mib: 4096,
@@ -1104,6 +1237,7 @@ mod tests {
             context: PathBuf::from("/ctx"),
             output_dir: PathBuf::from("/out"),
             output_filename: "image.tar".to_string(),
+            request_filename: None,
             tag: TAG.to_string(),
             cpus: 2,
             memory_mib: 4096,
@@ -1179,6 +1313,7 @@ mod tests {
             context: PathBuf::from("/ctx"),
             output_dir: PathBuf::from("/out"),
             output_filename: "out.tar".to_string(),
+            request_filename: None,
             tag: TAG.to_string(),
             cpus: 2,
             memory_mib: 4096,

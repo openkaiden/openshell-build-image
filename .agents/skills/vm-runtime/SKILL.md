@@ -132,11 +132,11 @@ cargo clippy --workspace --features vm -- -D warnings && cargo test --workspace 
 | `src/main.rs` | `--vm-*` flags, `select_runtime` / `select_vm` / `vm_config` |
 | `src/vm_rootfs.rs` | Unpacking the embedded rootfs, and its cache |
 | `build.rs` | Compressing that rootfs into the binary at build time |
-| `crates/vm-image-builder/src/lib.rs` | `VmConfig`, `VmBuild`, `build()`, the `VmRunner` trait, `VmBuildError` |
+| `crates/vm-image-builder/src/lib.rs` | `VmConfig`, `VmBuild`, `build()`, `build_with_request()`, the versioned JSON request, the `VmRunner` trait, `VmBuildError` |
 | `crates/vm-image-builder/src/dns.rs` | Discovering the host's nameservers to give the guest |
 | `crates/vm-image-builder/src/krun.rs` | The libkrun FFI calls, behind the `krun` feature |
 | `crates/vm-image-builder/vm-image/Containerfile` | What the build VM contains |
-| `crates/vm-image-builder/vm-image/vm-build` | What runs inside the VM |
+| `crates/vm-image-builder/vm-image/vm-build` | What runs inside the VM; receives the staged request path, while the no-addon build still uses the generated Containerfile |
 | `crates/vm-image-builder/vm-image/make-rootfs.sh` | Builds the rootfs directory and tarball |
 | `.github/workflows/vm-runtime.yml` | The only CI that compiles and boots the VM backend |
 

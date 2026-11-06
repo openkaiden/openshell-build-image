@@ -29,7 +29,7 @@ jobs:
   podman:
     name: "Podman on Linux (${{ matrix.name }})"
     runs-on: "ubuntu-26.04"
-    timeout-minutes: 30
+    timeout-minutes: 75
     strategy:
       fail-fast: false
       matrix:
@@ -42,6 +42,7 @@ jobs:
             image: "docker.io/alpine/curl@sha256:3f21f10cf24835f7baae20931f18640cc30915ea4151363fe4d8fb59ee296dfb"
     env:
       E2E_BASE_IMAGE: "${{ matrix.image }}"
+      E2E_BASE_KIND: "${{ matrix.name }}"
       E2E_DRIVER: "podman"
       E2E_ARTIFACTS: "target/e2e/podman/${{ matrix.name }}"
     steps:
@@ -111,8 +112,12 @@ jobs:
           podman create --name "$E2E_NAME-image-check" --network none "$E2E_IMAGE"
           podman cp "$E2E_NAME-image-check:/root/Containerfile" "$E2E_ARTIFACTS/Containerfile"
           podman rm --force "$E2E_NAME-image-check"
-          echo "E2E_SOURCE=$E2E_IMAGE" >> "$GITHUB_ENV"
           grep -Fx "FROM $E2E_BASE_IMAGE AS system" "$E2E_ARTIFACTS/Containerfile"
+
+      # e2e.sh sets E2E_SOURCE to the retained platforms-libc image.
+      - name: "Build and verify published addon fixtures"
+        timeout-minutes: 40
+        run: bash tests/e2e/addons/e2e.sh podman "$E2E_BASE_KIND"
 
       - name: "Start the owned Podman service"
         run: |
@@ -191,6 +196,7 @@ jobs:
         run: |
           if [ -z "${E2E_DIR:-}" ] || [ ! -d "$E2E_DIR" ]; then exit 0; fi
           failed=0
+          bash tests/e2e/addons/cleanup.sh podman || failed=1
           podman rm --force --ignore "$E2E_NAME-image-check" || failed=1
           if [ -f "$E2E_DIR/image-build-started" ] && podman image exists "$E2E_IMAGE"; then
             podman image rm --force "$E2E_IMAGE" || failed=1
@@ -213,7 +219,7 @@ jobs:
   docker:
     name: "Docker on Linux (${{ matrix.name }})"
     runs-on: "ubuntu-26.04"
-    timeout-minutes: 30
+    timeout-minutes: 75
     strategy:
       fail-fast: false
       matrix:
@@ -226,6 +232,7 @@ jobs:
             image: "docker.io/alpine/curl@sha256:3f21f10cf24835f7baae20931f18640cc30915ea4151363fe4d8fb59ee296dfb"
     env:
       E2E_BASE_IMAGE: "${{ matrix.image }}"
+      E2E_BASE_KIND: "${{ matrix.name }}"
       E2E_DRIVER: "docker"
       E2E_ARTIFACTS: "target/e2e/docker/${{ matrix.name }}"
     steps:
@@ -276,8 +283,12 @@ jobs:
           docker create --name "$E2E_NAME-image-check" --network none "$E2E_IMAGE"
           docker cp "$E2E_NAME-image-check:/root/Containerfile" "$E2E_ARTIFACTS/Containerfile"
           docker rm --force "$E2E_NAME-image-check"
-          echo "E2E_SOURCE=$E2E_IMAGE" >> "$GITHUB_ENV"
           grep -Fx "FROM $E2E_BASE_IMAGE AS system" "$E2E_ARTIFACTS/Containerfile"
+
+      # e2e.sh sets E2E_SOURCE to the retained platforms-libc image.
+      - name: "Build and verify published addon fixtures"
+        timeout-minutes: 40
+        run: bash tests/e2e/addons/e2e.sh docker "$E2E_BASE_KIND"
 
       - name: "Configure the docker driver"
         run: |
@@ -338,6 +349,7 @@ jobs:
         run: |
           if [ -z "${E2E_DIR:-}" ] || [ ! -d "$E2E_DIR" ]; then exit 0; fi
           failed=0
+          bash tests/e2e/addons/cleanup.sh docker || failed=1
           if docker container inspect "$E2E_NAME-image-check" > /dev/null 2>&1; then
             docker rm --force "$E2E_NAME-image-check" || failed=1
           fi
@@ -365,7 +377,7 @@ jobs:
   vm:
     name: "VM on macOS (${{ matrix.name }})"
     runs-on: ["self-hosted", "macos", "arm64"]
-    timeout-minutes: 30
+    timeout-minutes: 75
     needs: "build-vm-rootfs"
     environment: "integration"
     strategy:
@@ -463,8 +475,22 @@ jobs:
             > "$E2E_ARTIFACTS/image-build.log" 2>&1
           tar -tf "$E2E_DIR/image.tar" > "$E2E_ARTIFACTS/image-contents.log"
           tar -xOf "$E2E_DIR/image.tar" ./root/Containerfile > "$E2E_ARTIFACTS/Containerfile"
-          echo "E2E_SOURCE=$E2E_DIR/image.tar" >> "$GITHUB_ENV"
           grep -Fx "FROM $E2E_BASE_IMAGE AS system" "$E2E_ARTIFACTS/Containerfile"
+
+      - name: "Build addon rootfs for the OpenShell sandbox"
+        timeout-minutes: 30
+        run: |
+          source tests/e2e/addons/refs.sh
+          (cd "$E2E_DIR"; DYLD_LIBRARY_PATH="$(brew --prefix)/lib" \
+            "$GITHUB_WORKSPACE/target/release/openshell-build-image" \
+            --runtime vm --from "$E2E_BASE_IMAGE" --copy-containerfile -v \
+            --addon "$ADDON_PLATFORMS_LIBC" \
+            --vm-rootfs "$E2E_DIR/build-rootfs" \
+            --vm-output "$E2E_DIR/addon-image.tar" "$E2E_IMAGE") \
+            > "$E2E_ARTIFACTS/addon-image-build.log" 2>&1
+          test -s "$E2E_DIR/addon-image.tar"
+          # The sandbox step uses this addon-built rootfs; the plain build was only inspected.
+          echo "E2E_SOURCE=$E2E_DIR/addon-image.tar" >> "$GITHUB_ENV"
 
       - name: "Configure the vm driver"
         run: |
@@ -544,7 +570,7 @@ jobs:
     name: "Apple container on macOS (${{ matrix.name }})"
     # Apple's container CLI and the OpenShell VM driver both need a physical Mac.
     runs-on: ["self-hosted", "macos", "arm64"]
-    timeout-minutes: 30
+    timeout-minutes: 90
     environment: "integration"
     strategy:
       fail-fast: false
@@ -559,6 +585,7 @@ jobs:
             image: "docker.io/alpine/curl@sha256:3f21f10cf24835f7baae20931f18640cc30915ea4151363fe4d8fb59ee296dfb"
     env:
       E2E_BASE_IMAGE: "${{ matrix.image }}"
+      E2E_BASE_KIND: "${{ matrix.name }}"
       E2E_DRIVER: "vm"
       E2E_ARTIFACTS: "target/e2e/container/${{ matrix.name }}"
     steps:
@@ -639,7 +666,11 @@ jobs:
           test -n "$containerfile"
           tar -xOf "$E2E_DIR/image.tar" "$containerfile" > "$E2E_ARTIFACTS/Containerfile"
           grep -Fx "FROM $E2E_BASE_IMAGE AS system" "$E2E_ARTIFACTS/Containerfile"
-          echo "E2E_SOURCE=$E2E_DIR/image.tar" >> "$GITHUB_ENV"
+
+      # e2e.sh sets E2E_SOURCE to the exported platforms-libc rootfs tarball.
+      - name: "Build and verify published addon fixtures"
+        timeout-minutes: 55
+        run: bash tests/e2e/addons/e2e.sh container "$E2E_BASE_KIND"
 
       - name: "Configure the vm driver"
         run: |
@@ -701,6 +732,7 @@ jobs:
         run: |
           if [ -z "${E2E_DIR:-}" ] || [ ! -d "$E2E_DIR" ]; then exit 0; fi
           failed=0
+          bash tests/e2e/addons/cleanup.sh container || failed=1
           if [ -f "$E2E_DIR/image-check-started" ] && container inspect "$E2E_NAME-image-check" > /dev/null 2>&1; then
             container rm --force "$E2E_NAME-image-check" || failed=1
           fi
