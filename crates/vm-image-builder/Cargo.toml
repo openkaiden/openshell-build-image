@@ -30,6 +30,7 @@ default = []
 krun = ["dep:krun-sys"]
 
 [dependencies]
+serde_json = "1"
 log = "0.4"
 
 # Used for `fork`/`waitpid` in the krun backend and for `O_NOFOLLOW` when

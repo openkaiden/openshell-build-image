@@ -28,9 +28,18 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_DIR="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 ROOTFS="${1:-./vm-rootfs}"
 ARCHIVE_OUT="${2:-}"
 IMAGE="openshell-vm-rootfs"
+
+# Stage only build sources. The repository may contain local credentials,
+# artifacts, or a multi-gigabyte target directory that must not enter the
+# container build context.
+CONTEXT="$(mktemp -d "${TMPDIR:-/tmp}/openshell-vm-context.XXXXXX")"
+trap 'rm -rf "$CONTEXT"' EXIT
+cp "$REPO_DIR/Cargo.toml" "$REPO_DIR/Cargo.lock" "$REPO_DIR/build.rs" "$CONTEXT/"
+cp -R "$REPO_DIR/src" "$REPO_DIR/crates" "$CONTEXT/"
 
 if ! command -v podman >/dev/null 2>&1; then
     echo "error: podman is required to build the rootfs" >&2
@@ -42,7 +51,7 @@ podman build \
     --platform linux/arm64 \
     --tag "$IMAGE" \
     --file "$SCRIPT_DIR/Containerfile" \
-    "$SCRIPT_DIR"
+    "$CONTEXT"
 
 echo "Exporting rootfs to $ROOTFS..."
 mkdir -p "$ROOTFS"
@@ -55,6 +64,7 @@ CONTAINER="$(podman create --platform linux/arm64 "$IMAGE")"
 ARCHIVE="$(mktemp "${TMPDIR:-/tmp}/openshell-rootfs.XXXXXX")"
 cleanup() {
     rm -f "$ARCHIVE"
+    rm -rf "$CONTEXT"
     podman rm "$CONTAINER" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
