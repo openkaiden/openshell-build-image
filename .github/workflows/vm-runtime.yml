@@ -205,7 +205,7 @@ jobs:
         run: |
           for variant in fedora alpine; do
             case "$variant" in
-              fedora) image=registry.fedoraproject.org/fedora:latest ;;
+              fedora) image=registry.fedoraproject.org/fedora:44 ;;
               alpine) image=docker.io/library/alpine:3.24 ;;
             esac
             make run-vm FROM="$image" TAG="openshell-vm-test-$variant:integration" ARGS="-v --copy-containerfile"
@@ -221,10 +221,39 @@ jobs:
             containerfile=$(grep -E '(^|/)Containerfile$' "$RUNNER_TEMP/vm-rootfs-contents.txt")
             test -n "$containerfile"
             case "$variant" in
-              fedora) image=registry.fedoraproject.org/fedora:latest ;;
+              fedora) image=registry.fedoraproject.org/fedora:44 ;;
               alpine) image=docker.io/library/alpine:3.24 ;;
             esac
             tar -xOf "$archive" "$containerfile" | grep -Fx "FROM $image AS system"
+          done
+
+      - name: Build and verify VM addons on both libc bases
+        run: |
+          source tests/e2e/addons/refs.sh
+          for variant in fedora alpine; do
+            case "$variant" in
+              fedora)
+                image=registry.fedoraproject.org/fedora:44
+                libc=glibc
+                selected=$ADDON_PLATFORMS_LIBC_ARM64_GLIBC ;;
+              alpine)
+                image=docker.io/library/alpine:3.24
+                libc=musl
+                selected=$ADDON_PLATFORMS_LIBC_ARM64_MUSL ;;
+            esac
+            tag="openshell-vm-addon-$variant:integration"
+            archive="./target/openshell-vm-addon-$variant-integration.tar"
+            make run-vm FROM="$image" TAG="$tag" \
+              ARGS="-v --copy-containerfile --addon $ADDON_PLATFORMS_LIBC"
+            test -s "$archive"
+            test -s "$archive.config.json"
+            tar -xOf "$archive" ./usr/local/share/openshell-addon-test/platforms-libc/selected \
+              | grep -Fx "libc=$libc"
+            containerfile=$(tar -tf "$archive" | grep -E '(^|/)Containerfile$')
+            tar -xOf "$archive" "$containerfile" \
+              | grep -Fx "COPY --from=ghcr.io/openkaiden/tests/addon-platforms-libc@$selected / /"
+            python3 -c 'import json,sys; env=json.load(open(sys.argv[1]))["config"]["Env"]; assert sys.argv[2] in env' \
+              "$archive.config.json" "OSBI_TEST_VARIANT=linux-arm64-$libc"
           done
 
       # This runner is someone's own machine, and the exported rootfs is a few
@@ -236,4 +265,5 @@ jobs:
         if: always()
         run: |
           rm -rf ./vm-rootfs.tar ./target/openshell-vm-test-fedora-integration.tar ./target/openshell-vm-test-alpine-integration.tar "$RUNNER_TEMP/vm-rootfs-contents.txt"
+          rm -f ./target/openshell-vm-addon-fedora-integration.tar* ./target/openshell-vm-addon-alpine-integration.tar*
           rm -rf "$HOME/Library/Application Support/openshell-build-image/vm-rootfs"
