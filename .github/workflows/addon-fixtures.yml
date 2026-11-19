@@ -53,7 +53,7 @@ jobs:
           persist-credentials: false
 
       - name: Install Podman
-        uses: redhat-actions/podman-install@4a134a65f7324b2d03498c672cd4c6bce93e94b5 # v1.1.1
+        uses: redhat-actions/podman-install@4a5b244246ee7d71f896e53bbde9d98a503ddb9b # v1.1.2
         with:
           start-service: 'false'
 
@@ -97,7 +97,7 @@ jobs:
           persist-credentials: false
 
       - name: Install Podman
-        uses: redhat-actions/podman-install@4a134a65f7324b2d03498c672cd4c6bce93e94b5 # v1.1.1
+        uses: redhat-actions/podman-install@4a5b244246ee7d71f896e53bbde9d98a503ddb9b # v1.1.2
         with:
           start-service: 'false'
 
