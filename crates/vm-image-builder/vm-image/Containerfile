@@ -19,11 +19,19 @@
 #
 # A release branch, so a rebuild cannot pull a different buildah. Bump it
 # deliberately.
+FROM alpine:3.24 AS builder
+RUN apk add --no-cache cargo rust
+WORKDIR /src
+COPY Cargo.toml Cargo.lock build.rs ./
+COPY src ./src
+COPY crates ./crates
+RUN cargo build --release --locked -p vm-guest-helper
+
 FROM alpine:3.24
 
 # buildah lives in the community repo, which is not enabled in the base image.
 RUN echo "https://dl-cdn.alpinelinux.org/alpine/v3.24/community" >> /etc/apk/repositories && \
-    apk add --no-cache buildah netavark
+    apk add --no-cache buildah netavark skopeo
 
 # virtiofs does not support overlayfs, so tell buildah to use vfs instead.
 RUN mkdir -p /etc/containers && \
@@ -35,5 +43,6 @@ RUN mkdir -p /etc/containers && \
 RUN echo "nameserver 1.1.1.1" > /etc/resolv.conf
 
 # Build helper invoked by the host process inside the microVM.
-COPY vm-build /usr/local/bin/vm-build
-RUN chmod +x /usr/local/bin/vm-build
+COPY crates/vm-image-builder/vm-image/vm-build /usr/local/bin/vm-build
+COPY --from=builder /src/target/release/vm-guest-helper /usr/local/bin/vm-guest-helper
+RUN chmod +x /usr/local/bin/vm-build /usr/local/bin/vm-guest-helper
