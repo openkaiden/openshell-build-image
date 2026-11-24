@@ -66,10 +66,15 @@ mkdir -p /run/containers
 # The host passes its own nameservers here, since no fixed address works
 # everywhere. Empty is fine: the rootfs ships a public resolver as a fallback.
 # Bind-mounted rather than written, because /etc is on the shared rootfs.
+# Preserve other resolver settings, including options use-vc for TCP DNS,
+# when replacing the rootfs's nameservers.
 if [ -n "$OPENSHELL_VM_DNS" ]; then
-    for ns in $OPENSHELL_VM_DNS; do
-        echo "nameserver $ns"
-    done > /run/resolv.conf
+    {
+        awk '$1 != "nameserver"' /etc/resolv.conf
+        for ns in $OPENSHELL_VM_DNS; do
+            printf 'nameserver %s\n' "$ns"
+        done
+    } > /run/resolv.conf
     mount -o bind /run/resolv.conf /etc/resolv.conf
 fi
 
