@@ -1229,6 +1229,108 @@ mod tests {
         assert!(matches!(VmBuildError::from(io_err), VmBuildError::Io(_)));
     }
 
+    #[cfg(unix)]
+    mod vm_build_dns {
+        use super::tempdir;
+        use std::process::Command;
+
+        /// Run the guest script's DNS setup without booting a VM. Only the
+        /// resolver paths and mount command are replaced; the shell code that
+        /// generates the resolver configuration comes from vm-build itself.
+        fn configure(initial: &str, nameservers: &str) -> Option<String> {
+            let tmp = tempdir();
+            let source = tmp.path().join("rootfs-resolv.conf");
+            let destination = tmp.path().join("runtime-resolv.conf");
+            std::fs::write(&source, initial).unwrap();
+
+            let script = include_str!("../vm-image/vm-build");
+            let start = script
+                .find("if [ -n \"$OPENSHELL_VM_DNS\" ]; then")
+                .expect("vm-build has a DNS setup block");
+            let (block, _) = script[start..]
+                .split_once("\nfi\n")
+                .expect("the DNS setup block is terminated");
+            let block = block
+                .replace("/etc/resolv.conf", "\"$TEST_RESOLV_SOURCE\"")
+                .replace("/run/resolv.conf", "\"$TEST_RESOLV_DESTINATION\"");
+            let output = Command::new("sh")
+                .args(["-eu", "-c", &format!("mount() {{ :; }}\n{block}\nfi\n")])
+                .env("OPENSHELL_VM_DNS", nameservers)
+                .env("TEST_RESOLV_SOURCE", &source)
+                .env("TEST_RESOLV_DESTINATION", &destination)
+                .output()
+                .expect("run the guest DNS setup");
+            assert!(
+                output.status.success(),
+                "guest DNS setup failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(
+                std::fs::read_to_string(&source).unwrap(),
+                initial,
+                "the shared rootfs resolver must remain unchanged"
+            );
+            destination
+                .exists()
+                .then(|| std::fs::read_to_string(&destination).unwrap())
+        }
+
+        #[test]
+        fn replaces_nameservers_and_preserves_other_settings() {
+            let initial = "\
+# resolver settings
+  nameserver 1.1.1.1 # old IPv4 resolver
+search internal.example
+\tnameserver fd00::1
+domain example
+options use-vc timeout:2
+options attempts:1
+sortlist 10.0.0.0/8
+# nameserver 9.9.9.9
+
+";
+            let expected = "\
+# resolver settings
+search internal.example
+domain example
+options use-vc timeout:2
+options attempts:1
+sortlist 10.0.0.0/8
+# nameserver 9.9.9.9
+
+nameserver 192.168.1.254
+nameserver fd0f:ee:b0::1
+";
+            assert_eq!(
+                configure(initial, "192.168.1.254 fd0f:ee:b0::1").as_deref(),
+                Some(expected)
+            );
+        }
+
+        #[test]
+        fn preserves_files_without_tcp_dns_options() {
+            for (initial, expected) in [
+                ("", "nameserver 192.168.1.254\n"),
+                ("nameserver 1.1.1.1\n", "nameserver 192.168.1.254\n"),
+                (
+                    "nameserver 1.1.1.1\noptions timeout:2",
+                    "options timeout:2\nnameserver 192.168.1.254\n",
+                ),
+            ] {
+                assert_eq!(
+                    configure(initial, "192.168.1.254").as_deref(),
+                    Some(expected),
+                    "initial resolver configuration: {initial:?}"
+                );
+            }
+        }
+
+        #[test]
+        fn keeps_the_rootfs_resolver_without_nameservers() {
+            assert_eq!(configure("nameserver 1.1.1.1\noptions use-vc\n", ""), None);
+        }
+    }
+
     // --- helpers ---
 
     /// Minimal stand-in for `tempfile::TempDir` so the crate needs no dev
