@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "addon-rules"
-version = "0.13.0-next"
+version = "0.14.0-next"
 dependencies = [
  "serde_json",
 ]
@@ -241,7 +241,7 @@ checksum = "1d07550c9036bf2ae0c684c4297d503f838287c83c53686d05370d0e139ae570"
 
 [[package]]
 name = "container-image-builder"
-version = "0.13.0-next"
+version = "0.14.0-next"
 dependencies = [
  "addon-rules",
  "log",
@@ -956,7 +956,7 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
 name = "openshell-build-image"
-version = "0.13.0-next"
+version = "0.14.0-next"
 dependencies = [
  "addon-rules",
  "clap",
@@ -1745,7 +1745,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "vm-guest-helper"
-version = "0.13.0-next"
+version = "0.14.0-next"
 dependencies = [
  "addon-rules",
  "serde_json",
@@ -1755,7 +1755,7 @@ dependencies = [
 
 [[package]]
 name = "vm-image-builder"
-version = "0.13.0-next"
+version = "0.14.0-next"
 dependencies = [
  "krun-sys",
  "libc",
