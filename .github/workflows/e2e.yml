@@ -144,8 +144,8 @@ jobs:
           gateway_port = __GATEWAY_PORT__
           image_pull_policy = "if_not_present"
           stop_timeout_secs = 10
-          supervisor_image = "ghcr.io/nvidia/openshell/supervisor:$E2E_VERSION"
-          sandbox_runtime_image = "ghcr.io/nvidia/openshell/sandbox:$E2E_VERSION"
+          supervisor_image = "quay.io/ai-openshell/supervisor:$E2E_VERSION"
+          sandbox_runtime_image = "quay.io/ai-openshell/sandbox:$E2E_VERSION"
           EOF
 
       - name: "Start the OpenShell gateway"
@@ -297,8 +297,8 @@ jobs:
           image_pull_policy = "if_not_present"
           sandbox_label = "$E2E_NAME"
           app_armor_profile = "Unconfined"
-          supervisor_image = "ghcr.io/nvidia/openshell/supervisor:$E2E_VERSION"
-          sandbox_runtime_image = "ghcr.io/nvidia/openshell/sandbox:$E2E_VERSION"
+          supervisor_image = "quay.io/ai-openshell/supervisor:$E2E_VERSION"
+          sandbox_runtime_image = "quay.io/ai-openshell/sandbox:$E2E_VERSION"
           EOF
 
       - name: "Start the OpenShell gateway"
